@@ -9,7 +9,8 @@ from app.main import (SESSION_COOKIE, SESSION_MAX_AGE, app, create_session_token
 from app.models import ProviderName
 from app.provider_auth import parse_115_qr_state
 from app.providers import ProviderRegistry
-from app.services import (_find_urls, create_media_bundle, generate_strm,
+from app.services import (RANKING_PAGE_SIZE, _discover_tmdb_media, _find_urls,
+                          create_media_bundle, generate_strm,
                           media_folder, media_relative_path, parse_episode, safe_name,
                           trending_tmdb)
 from app.storage import JobStore
@@ -145,6 +146,60 @@ def test_tmdb_without_key_returns_no_fake_ranking(tmp_path: Path):
     assert "配置" in result["message"]
 
 
+def test_tmdb_discover_supports_24_item_logical_pages():
+    class Response:
+        def __init__(self, page: int):
+            self.page = page
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            first = (self.page - 1) * 20
+            return {
+                "total_results": 240,
+                "results": [
+                    {
+                        "id": first + index,
+                        "title": f"电影 {first + index}",
+                        "release_date": f"2026-08-{max(1, 31 - index):02d}",
+                        "popularity": index,
+                    }
+                    for index in range(20)
+                ],
+            }
+
+    class Client:
+        def __init__(self):
+            self.pages = []
+
+        async def get(self, _url, params):
+            self.pages.append(params["page"])
+            assert params["sort_by"] == "primary_release_date.desc"
+            assert "primary_release_date.lte" in params
+            assert params["vote_count.gte"] == 10
+            return Response(params["page"])
+
+    client = Client()
+    result = asyncio.run(_discover_tmdb_media(
+        client, "movie", api_key="key", language="zh-CN", region="CN",
+        page=2, page_size=RANKING_PAGE_SIZE,
+    ))
+    assert client.pages == [2, 3]
+    assert len(result["items"]) == 24
+    assert all(item["media_type"] == "movie" for item in result["items"])
+    assert result["total_pages"] == 10
+
+
+def test_home_ranking_is_paginated_and_has_no_date_limit():
+    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "每页 24 部" in javascript
+    assert "data-ranking-page" in javascript
+    assert "全量内容，不限制日期" in javascript
+    assert "tmdb_ranking_window" not in javascript
+    assert 'if (!state.overview)' in javascript
+
+
 def test_resource_visibility_requires_recognition_and_validation(tmp_path: Path):
     local_store = JobStore(tmp_path / "feihai.db")
     local_store.initialize()
@@ -190,6 +245,14 @@ def test_settings_hide_internal_gateway_and_link_tmdb_guide():
     assert 'id="openlistForm"' not in javascript
     assert "https://www.themoviedb.org/settings/api" in javascript
     assert "填写教程" in javascript
+
+
+def test_unavailable_provider_login_has_honest_in_page_guidance():
+    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "查看授权说明" in javascript
+    assert "夸克网页版可以扫码" in javascript
+    assert "中国移动开放平台面向申请接入的应用" in javascript
+    assert "把凭据交给未知中转" in javascript
 
 
 def test_compose_only_publishes_the_feihai_port():

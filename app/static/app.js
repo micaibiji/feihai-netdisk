@@ -6,6 +6,9 @@ const state = {
   query: "",
   search: null,
   provider: "all",
+  rankingType: "all",
+  rankingPage: 1,
+  rankingLoading: false,
 };
 const pm = {
   115: { label: "115网盘", short: "115", color: "#2f66ff" },
@@ -78,6 +81,10 @@ async function boot() {
   }
 }
 function nav(page) {
+  if (!state.overview) {
+    toast("正在读取数据，请稍候");
+    return;
+  }
   state.page = page;
   document
     .querySelectorAll("[data-page]")
@@ -117,24 +124,54 @@ function poster(x) {
     : `<div class="poster-placeholder"><span>${esc((x.title || "影")[0])}</span><small>飞海网盘</small></div>`;
   return `<button class="movie-card" data-movie='${esc(JSON.stringify(x))}'><div class="poster">${pic}<span class="rank">#${x.rank || "·"}</span><span class="score">★ ${x.score || "—"}</span><div class="poster-hover">查看详情</div></div><h3>${esc(x.title)}</h3><p>${esc(x.year || "待定")} · ${x.media_type === "movie" ? "电影" : "剧集"}</p></button>`;
 }
+function rankingPagination(r) {
+  const page = Number(r.page || 1),
+    total = Math.max(1, Math.min(500, Number(r.total_pages || 1))),
+    first = Math.max(1, Math.min(page - 2, total - 4)),
+    last = Math.min(total, first + 4),
+    pages = [];
+  for (let value = first; value <= last; value++) pages.push(value);
+  return `<nav class="ranking-pagination" aria-label="影视排行翻页"><span>每页 24 部 · 第 ${page} / ${total} 页</span><div><button data-ranking-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>← 上一页</button>${pages.map((value) => `<button data-ranking-page="${value}" class="${value === page ? "active" : ""}">${value}</button>`).join("")}<button data-ranking-page="${page + 1}" ${page >= total ? "disabled" : ""}>下一页 →</button></div></nav>`;
+}
 function home() {
   const r = state.overview.ranking,
     x = r.items || [],
     hero = x[0] || {},
     has = x.length > 0;
-  app.innerHTML = `<section class="hero ${has ? "" : "hero-empty"}" ${hero.backdrop ? `style="background-image:url('${esc(hero.backdrop)}')"` : ""}><div class="hero-shade"></div><div class="hero-copy"><span>${has ? "今日热榜 · TOP 1" : "实时榜单尚未启用"}</span><h1>${esc(hero.title || "连接 TMDB")}</h1><p class="meta">${has ? `${esc(hero.year || "")} · ${hero.media_type === "movie" ? "电影" : "剧集"} · TMDB ${hero.score || "—"} 分` : "首页不会使用示例影视或虚构排名"}</p><p>${esc(hero.overview || r.message || "请在设置中填写 TMDB API 密钥，测试成功后立即显示真实海报榜单。")}</p><div>${has ? `<button class="primary" data-movie='${esc(JSON.stringify(hero))}'>查看与搜索资源</button><button class="glass" data-follow-title="${esc(hero.title || "")}" data-follow-type="${hero.media_type || "tv"}">+ 订阅追更</button>` : '<button class="primary" data-page="settings">前往 TMDB 设置</button>'}</div></div><div class="hero-badge"><b>${r.live ? "实时" : "未连接"}</b><span>${r.live ? `更新于 ${date(r.updated_at)}` : "没有展示假数据"}</span></div></section><section class="provider-strip"><header><div><span>网盘连接</span><small>独立使用，不进行跨盘秒传</small></div><button data-page="accounts">管理账号 →</button></header><div class="provider-grid">${providerCards()}</div></section><section class="content-section"><header class="section-head"><div><span>实时影视排行</span><h2>发现值得看的内容</h2></div><div class="segments">${[
-    ["all", "最近热门"],
+  app.innerHTML = `<section class="hero ${has ? "" : "hero-empty"}" ${hero.backdrop ? `style="background-image:url('${esc(hero.backdrop)}')"` : ""}><div class="hero-shade"></div><div class="hero-copy"><span>${has ? `最新排行 · #${hero.rank || 1}` : "实时榜单尚未启用"}</span><h1>${esc(hero.title || "连接 TMDB")}</h1><p class="meta">${has ? `${esc(hero.year || "")} · ${hero.media_type === "movie" ? "电影" : "剧集"} · TMDB ${hero.score || "—"} 分` : "首页不会使用示例影视或虚构排名"}</p><p>${esc(hero.overview || r.message || "请在设置中填写 TMDB API 密钥，测试成功后立即显示真实海报榜单。")}</p><div>${has ? `<button class="primary" data-movie='${esc(JSON.stringify(hero))}'>查看与搜索资源</button><button class="glass" data-follow-title="${esc(hero.title || "")}" data-follow-type="${hero.media_type || "tv"}">+ 订阅追更</button>` : '<button class="primary" data-page="settings">前往 TMDB 设置</button>'}</div></div><div class="hero-badge"><b>${r.live ? "实时" : "未连接"}</b><span>${r.live ? `更新于 ${date(r.updated_at)}` : "没有展示假数据"}</span></div></section><section class="provider-strip"><header><div><span>网盘连接</span><small>独立使用，不进行跨盘秒传</small></div><button data-page="accounts">管理账号 →</button></header><div class="provider-grid">${providerCards()}</div></section><section class="content-section"><header class="section-head"><div><span>全量影视排行</span><h2>最新上映与热门内容</h2><p>不限制日期，按上映或首播时间从新到旧；同日按热度排序</p></div><div class="segments">${[
+    ["all", "全部"],
     ["movie", "电影"],
     ["tv", "剧集"],
   ]
     .map(
       ([k, v]) =>
-        `<button data-ranking="${k}" class="${k === "all" ? "active" : ""}">${v}</button>`,
+        `<button data-ranking="${k}" class="${k === state.rankingType ? "active" : ""}">${v}</button>`,
     )
     .join(
       "",
-    )}</div></header>${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>` : '<div class="empty-state compact"><h2>等待真实榜单</h2><p>配置并测试 TMDB 后自动显示，不使用演示海报。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>只展示验证有效的来源；失败或受限时自动切换备用来源。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>验证有效</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
+    )}</div></header>${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>等待真实榜单</h2><p>配置并测试 TMDB 后自动显示，不使用演示海报。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>只展示验证有效的来源；失败或受限时自动切换备用来源。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>验证有效</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
   bind();
+}
+
+async function loadRanking(type, page) {
+  if (state.rankingLoading) return;
+  state.rankingLoading = true;
+  try {
+    const ranking = await api(
+      `/api/tmdb/trending?media_type=${encodeURIComponent(type)}&page=${page}`,
+    );
+    state.overview.ranking = ranking;
+    state.rankingType = type;
+    state.rankingPage = ranking.page || page;
+    home();
+    document
+      .querySelector(".content-section")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.rankingLoading = false;
+  }
 }
 
 function searchPage() {
@@ -209,11 +246,11 @@ function accounts() {
       const m = pm[x.name],
         ok = x.configured,
         ready = (x.auth_methods || []).length > 0;
-      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${ready ? authMethodLabel(x.auth_methods[0]) : "需要先完成接入设置"}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer><button class="primary" data-auth="${x.name}" ${ready ? "" : "disabled"}>${ok ? "重新登录" : ready ? "立即登录" : "暂不可登录"}</button></footer></article>`;
+      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${ready ? authMethodLabel(x.auth_methods[0]) : "需要先完成安全接入"}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer><button class="primary" ${ready ? `data-auth="${x.name}"` : `data-auth-guide="${x.name}"`}>${ok ? "重新登录" : ready ? "立即登录" : "查看授权说明"}</button></footer></article>`;
     })
     .join(
       "",
-    )}</div><aside class="security-note"><span>⌾</span><div><b>没有 Token / Cookie 输入框</b><p>普通页面不再要求手工粘贴技术凭证。115 直接显示二维码；百度、夸克与移动会在真实登录功能完成后启用。</p></div></aside>`;
+    )}</div><aside class="security-note"><span>⌾</span><div><b>不伪造一键登录，也不把凭据交给未知中转</b><p>115 可直接显示二维码；其余网盘只有在满足“凭据保存在本机”的前提下才会开放登录按钮。</p></div></aside>`;
 }
 function authMethodLabel(x) {
   return (
@@ -259,11 +296,10 @@ function settings() {
     naming_language: "zh-CN",
     tmdb_language: "zh-CN",
     tmdb_region: "CN",
-    tmdb_ranking_window: "day",
     ...state.overview.settings,
   };
   if (s.tmdb_region === "TW") s.tmdb_region = "zh-TW";
-  return `<div class="settings-grid"><form id="tmdbForm" class="settings-card full"><header><i>影</i><div><h3>TMDB 影视数据</h3><p>首页海报、实时排名、影视详情和自动识别；保存后立即生效，无需重启容器</p></div><em class="setting-state ${s.tmdb_configured ? "connected" : "offline"}">${s.tmdb_configured ? "已连接" : "未配置"}</em></header><label class="field"><div class="field-heading"><span>TMDB API 密钥</span><nav><a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">获取密钥 ↗</a><button type="button" id="tmdbGuide">填写教程</button></nav></div><div class="secret-field"><input type="password" name="api_key" placeholder="${s.tmdb_configured ? "已保存；留空表示不更换" : "请输入 API Key (v3 auth)"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>语言</span><select name="language"><option value="zh-CN" ${s.tmdb_language === "zh-CN" ? "selected" : ""}>简体中文</option><option value="zh-TW" ${s.tmdb_language === "zh-TW" ? "selected" : ""}>繁体中文</option></select></label><label class="field"><span>地区</span><select name="region"><option value="CN" ${s.tmdb_region === "CN" ? "selected" : ""}>中国大陆</option><option value="HK" ${s.tmdb_region === "HK" ? "selected" : ""}>中国香港</option><option value="TW" ${s.tmdb_region === "zh-TW" ? "selected" : ""}>中国台湾</option></select></label><label class="field"><span>榜单周期</span><select name="ranking_window"><option value="day" ${s.tmdb_ranking_window === "day" ? "selected" : ""}>今日热门</option><option value="week" ${s.tmdb_ranking_window === "week" ? "selected" : ""}>本周热门</option></select></label><div class="settings-actions"><button type="button" id="testTmdb">测试连接</button><button class="primary">保存并刷新首页</button></div></form><form id="settingsForm" class="settings-card full"><header><i>▦</i><div><h3>通知、自动整理与飞牛影视</h3><p>保存后只影响后续任务，不自动移动或删除已有文件</p></div></header><label class="toggle-row"><span><b>Telegram 通知</b><small>追更、入库失败和风控异常提醒</small></span><input type="checkbox" name="telegram_enabled" ${s.telegram_enabled ? "checked" : ""}><i></i></label>${[
+  return `<div class="settings-grid"><form id="tmdbForm" class="settings-card full"><header><i>影</i><div><h3>TMDB 影视数据</h3><p>首页海报、全量排行、影视详情和自动识别；保存后立即生效，无需重启容器</p></div><em class="setting-state ${s.tmdb_configured ? "connected" : "offline"}">${s.tmdb_configured ? "已连接" : "未配置"}</em></header><label class="field"><div class="field-heading"><span>TMDB API 密钥</span><nav><a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">获取密钥 ↗</a><button type="button" id="tmdbGuide">填写教程</button></nav></div><div class="secret-field"><input type="password" name="api_key" placeholder="${s.tmdb_configured ? "已保存；留空表示不更换" : "请输入 API Key (v3 auth)"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>语言</span><select name="language"><option value="zh-CN" ${s.tmdb_language === "zh-CN" ? "selected" : ""}>简体中文</option><option value="zh-TW" ${s.tmdb_language === "zh-TW" ? "selected" : ""}>繁体中文</option></select></label><label class="field"><span>地区</span><select name="region"><option value="CN" ${s.tmdb_region === "CN" ? "selected" : ""}>中国大陆</option><option value="HK" ${s.tmdb_region === "HK" ? "selected" : ""}>中国香港</option><option value="TW" ${s.tmdb_region === "zh-TW" ? "selected" : ""}>中国台湾</option></select></label><label class="field"><span>首页排行</span><div class="setting-static"><b>全量内容，不限制日期</b><small>上映或首播时间从新到旧；同一天按热度从高到低</small></div></label><div class="settings-actions"><button type="button" id="testTmdb">测试连接</button><button class="primary">保存并刷新首页</button></div></form><form id="settingsForm" class="settings-card full"><header><i>▦</i><div><h3>通知、自动整理与飞牛影视</h3><p>保存后只影响后续任务，不自动移动或删除已有文件</p></div></header><label class="toggle-row"><span><b>Telegram 通知</b><small>追更、入库失败和风控异常提醒</small></span><input type="checkbox" name="telegram_enabled" ${s.telegram_enabled ? "checked" : ""}><i></i></label>${[
     ["auto_metadata", "自动匹配 TMDB 信息"],
     ["auto_subtitles", "自动整理中文字幕"],
     ["auto_organize", "入库后自动生成 STRM / NFO"],
@@ -282,6 +318,55 @@ function showTmdbGuide() {
   modalRoot.querySelector(".modal-close").onclick = close;
 }
 
+function showProviderAuthGuide(provider) {
+  const guides = {
+    baidu: {
+      status: "可安全接入 · 需要一次性准备",
+      title: "百度网盘官方授权",
+      summary:
+        "百度要求每个接入程序先拥有官方应用信息。配置一次后，账号页就能打开百度官方授权页面，不需要填写 Cookie 或 Token。",
+      steps: [
+        "登录百度网盘开放平台并创建“软件”类型应用。",
+        "取得 AppKey 与 SecretKey，并配置授权回调地址。",
+        "在飞海网盘中加密保存应用信息，然后点击百度官方授权。",
+      ],
+      link: "https://pan.baidu.com/union/console/applist",
+      linkLabel: "打开百度网盘开放平台 ↗",
+    },
+    quark: {
+      status: "暂不开放 · 等待本机直连方案",
+      title: "夸克网盘扫码限制",
+      summary:
+        "夸克网页版可以扫码，但没有向私人 NAS 提供可完成挂载的官方授权接口。现有扫码挂载方案会经过第三方服务，不符合凭据只保存在飞牛 NAS 的要求。",
+      steps: [
+        "当前不要求你粘贴 Cookie、Token 或浏览器数据。",
+        "不会把二维码授权结果发送给第三方中转。",
+        "出现可靠的本机直连方式后，再启用“立即登录”。",
+      ],
+      link: "https://pan.quark.cn/",
+      linkLabel: "查看夸克网盘官网 ↗",
+    },
+    china_mobile: {
+      status: "暂不开放 · 官方个人授权能力不足",
+      title: "中国移动云盘授权限制",
+      summary:
+        "中国移动开放平台面向申请接入的应用；现有个人盘长期连接方式仍依赖账号密码和邮箱登录凭据，无法只靠普通扫码安全完成。",
+      steps: [
+        "当前不会让你手工填写邮箱 Cookie 或 Authorization。",
+        "不会绕过短信、验证码或账号风控。",
+        "获得官方应用接入能力后，可改为账号授权或手机号验证码流程。",
+      ],
+      link: "https://open.yun.139.com/",
+      linkLabel: "查看中国移动云盘开放平台 ↗",
+    },
+  };
+  const guide = guides[provider];
+  if (!guide) return;
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="form-modal provider-auth-guide"><button class="modal-close">×</button><small>${guide.status}</small><h2>${guide.title}</h2><p>${guide.summary}</p><ol>${guide.steps.map((step) => `<li>${step}</li>`).join("")}</ol><aside>飞海网盘会优先选择本机、安全、可持续的授权方式；功能未接通时会明确显示原因。</aside><div class="guide-actions"><a class="primary" href="${guide.link}" target="_blank" rel="noreferrer">${guide.linkLabel}</a><button type="button" class="guide-close">知道了</button></div></section></div>`;
+  modalRoot.querySelector(".modal-close").onclick = close;
+  modalRoot.querySelector(".guide-close").onclick = close;
+}
+
 function bind() {
   document
     .querySelectorAll("[data-movie]")
@@ -293,19 +378,16 @@ function bind() {
         (e.onclick = () =>
           quickFollow(e.dataset.followTitle, e.dataset.followType)),
     );
-  document.querySelectorAll("[data-ranking]").forEach(
-    (e) =>
-      (e.onclick = async () => {
-        try {
-          state.overview.ranking = await api(
-            `/api/tmdb/trending?media_type=${e.dataset.ranking}`,
-          );
-          home();
-        } catch (x) {
-          toast(x.message, "error");
-        }
-      }),
-  );
+  document
+    .querySelectorAll("[data-ranking]")
+    .forEach((e) => (e.onclick = () => loadRanking(e.dataset.ranking, 1)));
+  document
+    .querySelectorAll("[data-ranking-page]")
+    .forEach(
+      (e) =>
+        (e.onclick = () =>
+          loadRanking(state.rankingType, Number(e.dataset.rankingPage))),
+    );
   const sf = document.querySelector("#resourceSearch");
   if (sf)
     sf.onsubmit = (e) => {
@@ -351,6 +433,11 @@ function bind() {
   document
     .querySelectorAll("[data-auth]")
     .forEach((e) => (e.onclick = () => startAuth(e.dataset.auth)));
+  document
+    .querySelectorAll("[data-auth-guide]")
+    .forEach(
+      (e) => (e.onclick = () => showProviderAuthGuide(e.dataset.authGuide)),
+    );
   const rs = document.querySelector("#riskScan");
   if (rs) rs.onclick = runRisk;
   const pn = document.querySelector("#previewNaming");

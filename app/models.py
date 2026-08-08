@@ -84,7 +84,6 @@ class TmdbSettingsRequest(BaseModel):
     api_key: str = Field(default="", max_length=500)
     language: str = Field(default="zh-CN", pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
     region: str = Field(default="CN", pattern=r"^[A-Z]{2}$")
-    ranking_window: str = Field(default="day", pattern="^(day|week)$")
 
 
 class ResourceValidationRequest(BaseModel):

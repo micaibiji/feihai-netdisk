@@ -53,7 +53,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.1", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -158,7 +158,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.1", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.2", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -184,7 +184,6 @@ async def overview(_: str = Depends(require_login)):
     ui_settings.update({"tmdb_configured": bool(current_tmdb["api_key"]),
                         "tmdb_language": current_tmdb["language"],
                         "tmdb_region": current_tmdb["region"],
-                        "tmdb_ranking_window": current_tmdb["window"],
                         "openlist_configured": openlist_configured()})
     return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
             "risk_events": store.list_risk_events(8), "settings": ui_settings}
@@ -230,15 +229,14 @@ def tmdb_config() -> dict[str, str]:
         "api_key": vault.load_secret("tmdb_api_key") or settings.tmdb_api_key,
         "language": str(stored.get("tmdb_language") or "zh-CN"),
         "region": str(stored.get("tmdb_region") or "CN"),
-        "window": str(stored.get("tmdb_ranking_window") or "day"),
     }
 
 
-async def current_trending(media_type: str = "all") -> dict:
+async def current_trending(media_type: str = "all", page: int = 1) -> dict:
     config = tmdb_config()
     return await trending_tmdb(settings, media_type, api_key=config["api_key"],
                                language=config["language"], region=config["region"],
-                               window=config["window"])
+                               page=page)
 
 
 @app.get("/api/providers")
@@ -374,9 +372,10 @@ async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
 
 
 @app.get("/api/tmdb/trending")
-async def tmdb_trending(media_type: str = "all", _: str = Depends(require_login)):
+async def tmdb_trending(media_type: str = "all", page: int = Query(default=1, ge=1, le=500),
+                        _: str = Depends(require_login)):
     try:
-        return await current_trending(media_type)
+        return await current_trending(media_type, page)
     except Exception as error:
         raise HTTPException(502, f"TMDB榜单查询失败：{error}") from error
 
@@ -485,7 +484,7 @@ def get_app_settings(_: str = Depends(require_login)):
     values = store.load_settings()
     tmdb = tmdb_config()
     values.update({"tmdb_configured": bool(tmdb["api_key"]), "tmdb_language": tmdb["language"],
-                   "tmdb_region": tmdb["region"], "tmdb_ranking_window": tmdb["window"],
+                   "tmdb_region": tmdb["region"],
                    "openlist_configured": openlist_configured()})
     return values
 
@@ -500,8 +499,7 @@ def update_app_settings(payload: SettingsRequest, _: str = Depends(require_login
 def get_tmdb_settings(_: str = Depends(require_login)):
     config = tmdb_config()
     return {"configured": bool(config["api_key"]), "api_key_mask": "••••••••" if config["api_key"] else "",
-            "language": config["language"], "region": config["region"],
-            "ranking_window": config["window"]}
+            "language": config["language"], "region": config["region"]}
 
 
 @app.put("/api/settings/tmdb")
@@ -509,14 +507,13 @@ async def update_tmdb_settings(payload: TmdbSettingsRequest, _: str = Depends(re
     if payload.api_key:
         try:
             await trending_tmdb(settings, "movie", api_key=payload.api_key, language=payload.language,
-                                region=payload.region, window=payload.ranking_window)
+                                region=payload.region)
         except httpx.HTTPError as error:
             raise HTTPException(400, "TMDB 密钥测试失败，请检查密钥和网络") from error
         vault.save_secret("tmdb_api_key", payload.api_key)
     elif not vault.load_secret("tmdb_api_key") and not settings.tmdb_api_key:
         raise HTTPException(400, "请输入 TMDB API 密钥")
-    store.save_settings({"tmdb_language": payload.language, "tmdb_region": payload.region,
-                         "tmdb_ranking_window": payload.ranking_window})
+    store.save_settings({"tmdb_language": payload.language, "tmdb_region": payload.region})
     return {"saved": True, "test": "connected", "settings": get_tmdb_settings(_)}
 
 

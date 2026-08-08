@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +18,9 @@ from .providers import ProviderRegistry
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
+TMDB_SOURCE_PAGE_SIZE = 20
+TMDB_MAX_SOURCE_PAGE = 500
+RANKING_PAGE_SIZE = 24
 EPISODE_PATTERNS = (
     re.compile(r"S(?P<season>\d{1,2})\s*E(?P<episode>\d{1,4})", re.I),
     re.compile(r"第\s*(?P<episode>\d{1,4})\s*[集话期]"),
@@ -114,19 +119,100 @@ async def search_tmdb(settings: Settings, query: str, *, api_key: str | None = N
     return [_tmdb_item(item) for item in results if item.get("media_type") in {"movie", "tv"}]
 
 
+def _ranking_sort_key(item: dict[str, Any]) -> tuple[str, float]:
+    date = str(item.get("release_date") or item.get("first_air_date") or "")
+    return date, float(item.get("popularity") or 0)
+
+
+async def _discover_tmdb_media(client: httpx.AsyncClient, media_type: str, *, api_key: str,
+                               language: str, region: str, page: int,
+                               page_size: int) -> dict[str, Any]:
+    """Return a stable logical page while TMDB itself uses fixed 20-item pages."""
+    start = (page - 1) * page_size
+    first_source_page = start // TMDB_SOURCE_PAGE_SIZE + 1
+    offset = start % TMDB_SOURCE_PAGE_SIZE
+    last_source_page = (start + page_size - 1) // TMDB_SOURCE_PAGE_SIZE + 1
+    if first_source_page > TMDB_MAX_SOURCE_PAGE:
+        return {"items": [], "total_results": 0, "total_pages": 0}
+
+    source_pages = range(first_source_page, min(last_source_page, TMDB_MAX_SOURCE_PAGE) + 1)
+    date_field = "primary_release_date" if media_type == "movie" else "first_air_date"
+    params = {
+        "api_key": api_key,
+        "language": language,
+        "include_adult": "false",
+        "sort_by": f"{date_field}.desc",
+        f"{date_field}.lte": datetime.now(UTC).date().isoformat(),
+        "vote_count.gte": 10,
+    }
+    if media_type == "movie":
+        params.update({"region": region, "include_video": "false"})
+
+    async def fetch(source_page: int) -> dict[str, Any]:
+        response = await client.get(
+            f"https://api.themoviedb.org/3/discover/{media_type}",
+            params={**params, "page": source_page},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    bodies = await asyncio.gather(*(fetch(source_page) for source_page in source_pages))
+    total_results = int((bodies[0] if bodies else {}).get("total_results") or 0)
+    available_results = min(total_results, TMDB_SOURCE_PAGE_SIZE * TMDB_MAX_SOURCE_PAGE)
+    raw_items = [item for body in bodies for item in (body.get("results") or [])]
+    raw_items = raw_items[offset:offset + page_size]
+    for item in raw_items:
+        item["media_type"] = media_type
+    raw_items.sort(key=_ranking_sort_key, reverse=True)
+    return {
+        "items": raw_items,
+        "total_results": available_results,
+        "total_pages": min(500, math.ceil(available_results / page_size)) if available_results else 0,
+    }
+
+
 async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key: str | None = None,
                         language: str = "zh-CN", region: str = "CN",
-                        window: str = "day") -> dict[str, Any]:
+                        page: int = 1) -> dict[str, Any]:
     effective_key = settings.tmdb_api_key if api_key is None else api_key
+    page = max(1, int(page))
     if not effective_key:
-        return {"live": False, "items": [], "updated_at": None, "message": "请在设置中配置 TMDB API 密钥"}
+        return {"live": False, "items": [], "updated_at": None,
+                "message": "请在设置中配置 TMDB API 密钥", "page": page,
+                "page_size": RANKING_PAGE_SIZE, "total_pages": 0, "total_results": 0}
     endpoint_type = media_type if media_type in {"movie", "tv"} else "all"
-    endpoint_window = window if window in {"day", "week"} else "day"
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(f"https://api.themoviedb.org/3/trending/{endpoint_type}/{endpoint_window}", params={"api_key": effective_key, "language": language, "region": region})
-        response.raise_for_status()
-        items = response.json().get("results", [])
-    return {"live": True, "items": [_tmdb_item(item, index + 1) for index, item in enumerate(items[:18]) if item.get("media_type", endpoint_type) in {"movie", "tv"}], "updated_at": datetime.now(UTC).isoformat(), "message": "TMDB 实时榜单"}
+        if endpoint_type == "all":
+            movie_page, tv_page = await asyncio.gather(
+                _discover_tmdb_media(client, "movie", api_key=effective_key,
+                                     language=language, region=region, page=page, page_size=12),
+                _discover_tmdb_media(client, "tv", api_key=effective_key,
+                                     language=language, region=region, page=page, page_size=12),
+            )
+            raw_items = movie_page["items"] + tv_page["items"]
+            raw_items.sort(key=_ranking_sort_key, reverse=True)
+            total_results = movie_page["total_results"] + tv_page["total_results"]
+            total_pages = max(movie_page["total_pages"], tv_page["total_pages"])
+        else:
+            result = await _discover_tmdb_media(
+                client, endpoint_type, api_key=effective_key, language=language,
+                region=region, page=page, page_size=RANKING_PAGE_SIZE,
+            )
+            raw_items = result["items"]
+            total_results = result["total_results"]
+            total_pages = result["total_pages"]
+    rank_start = (page - 1) * RANKING_PAGE_SIZE
+    return {
+        "live": True,
+        "items": [_tmdb_item(item, rank_start + index + 1) for index, item in enumerate(raw_items)],
+        "updated_at": datetime.now(UTC).isoformat(),
+        "message": "按上映日期与热度排序",
+        "page": page,
+        "page_size": RANKING_PAGE_SIZE,
+        "total_pages": total_pages,
+        "total_results": total_results,
+        "sort": "date_desc,popularity_desc",
+    }
 
 
 async def send_notifications(settings: Settings, message: str) -> list[str]:
