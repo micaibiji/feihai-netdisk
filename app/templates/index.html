@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0b7a47">
   <title>{{ app_name }}</title>
-  <link rel="stylesheet" href="/static/app.css?v=031">
+  <link rel="stylesheet" href="/static/app.css?v=032">
 </head>
 <body>
   <header class="topbar">
@@ -30,7 +30,19 @@
   <nav class="mobile-nav">
     <button data-page="home" class="active"><span>⌂</span>首页</button><button data-page="search"><span>⌕</span>搜索</button><button data-page="following"><span>◎</span>追更</button><button data-page="library"><span>▦</span>媒体库</button><button data-page="accounts"><span>☁</span>账号</button><button data-page="risk"><span>◇</span>风控</button>
   </nav>
+  <div id="sessionGate" class="session-gate" hidden>
+    <form id="sessionGateForm" class="session-gate-card">
+      <div class="gate-mark"><span><i></i><i></i><i></i></span></div>
+      <small>飞海网盘 · 本次访问验证</small>
+      <h2>请输入验证密码</h2>
+      <p>每次新打开飞海网盘，都需要验证管理密码才能查看内容。</p>
+      <label><span>验证密码</span><input name="password" type="password" autocomplete="current-password" required autofocus placeholder="请输入管理密码"></label>
+      <p class="gate-error"></p>
+      <button class="primary" type="submit">验证并进入 <i>→</i></button>
+      <em>密码只在你的飞牛 NAS 内验证</em>
+    </form>
+  </div>
   <div id="modalRoot"></div><div id="toastRoot"></div>
-  <script src="/static/app.js?v=031"></script>
+  <script src="/static/app.js?v=032"></script>
 </body>
 </html>

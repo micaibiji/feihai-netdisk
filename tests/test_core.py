@@ -119,5 +119,10 @@ def test_browser_login_page_replaces_basic_auth_prompt():
         assert "www-authenticate" not in unauthorized.headers
         login = client.post("/login", data={"username": settings.admin_username, "password": settings.admin_password}, follow_redirects=False)
         assert login.status_code == 303
+        assert login.headers["location"] == "/?verified=1"
         assert SESSION_COOKIE in login.cookies
         assert client.get("/").status_code == 200
+        assert client.post("/api/verify-password", json={"password": "wrong-password"}).status_code == 401
+        verified = client.post("/api/verify-password", json={"password": settings.admin_password})
+        assert verified.status_code == 200
+        assert verified.json() == {"verified": True}

@@ -46,7 +46,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.3.1", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.3.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -121,7 +121,7 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     valid_password = secrets.compare_digest(password, settings.admin_password)
     if not (valid_user and valid_password):
         return templates.TemplateResponse(request=request, name="login.html", context={"app_name": settings.app_name, "error": "账号或密码不正确"}, status_code=401)
-    response = RedirectResponse("/", status_code=303)
+    response = RedirectResponse("/?verified=1", status_code=303)
     response.set_cookie(SESSION_COOKIE, create_session_token(username), max_age=SESSION_MAX_AGE, httponly=True, samesite="lax", secure=False, path="/")
     return response
 
@@ -142,7 +142,19 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.3.1", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.3.2", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+
+
+@app.post("/api/verify-password")
+async def verify_password(request: Request, _: str = Depends(require_login)):
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="请输入验证密码") from error
+    password = str(payload.get("password", ""))
+    if not secrets.compare_digest(password, settings.admin_password):
+        raise HTTPException(status_code=401, detail="验证密码不正确")
+    return {"verified": True}
 
 
 @app.get("/api/overview")
