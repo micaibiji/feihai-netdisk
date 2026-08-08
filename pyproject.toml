@@ -1,0 +1,9 @@
+[project]
+name = "feihai-drive"
+version = "0.1.0"
+description = "飞海网盘：轻量网盘影视自动化平台"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
