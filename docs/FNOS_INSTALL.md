@@ -130,7 +130,7 @@ Exited: 0
 - 飞海网盘：`http://你的NAS局域网IP:12366`
 - OpenList 授权网关：`http://你的NAS局域网IP:5244`
 
-飞海网盘登录账号密码就是 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
+打开地址后会显示飞海网盘中文登录页，账号密码就是 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
 
 进入首页后按以下顺序检查：
 
@@ -143,7 +143,7 @@ Exited: 0
 健康检查地址为 `http://你的NAS局域网IP:12366/api/health`。正常结果中应包含：
 
 ```json
-{"status":"ok","name":"飞海网盘","version":"0.3.0","database":true,"strm_writable":true}
+{"status":"ok","name":"飞海网盘","version":"0.3.1","database":true,"strm_writable":true}
 ```
 
 ## 六、网盘授权

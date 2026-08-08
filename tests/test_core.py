@@ -1,6 +1,10 @@
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app.config import Settings
+from app.main import (SESSION_COOKIE, SESSION_MAX_AGE, app, create_session_token, settings,
+                      validate_session_token)
 from app.models import ProviderName
 from app.providers import ProviderRegistry
 from app.services import (_find_urls, create_media_bundle, generate_strm,
@@ -96,3 +100,24 @@ def test_credentials_are_encrypted_at_rest(tmp_path: Path):
     vault.save("115", "secret-cookie-value")
     assert vault.load("115") == "secret-cookie-value"
     assert b"secret-cookie-value" not in (tmp_path / "credentials" / "115.token").read_bytes()
+
+
+def test_signed_session_token_expires_and_rejects_tampering():
+    token = create_session_token(settings.admin_username, now=100)
+    assert validate_session_token(token, now=101) == settings.admin_username
+    assert validate_session_token(token, now=100 + SESSION_MAX_AGE + 1) is None
+    assert validate_session_token(token[:-1] + ("A" if token[-1] != "A" else "B"), now=101) is None
+
+
+def test_browser_login_page_replaces_basic_auth_prompt():
+    with TestClient(app) as client:
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login"
+        unauthorized = client.get("/api/providers")
+        assert unauthorized.status_code == 401
+        assert "www-authenticate" not in unauthorized.headers
+        login = client.post("/login", data={"username": settings.admin_username, "password": settings.admin_password}, follow_redirects=False)
+        assert login.status_code == 303
+        assert SESSION_COOKIE in login.cookies
+        assert client.get("/").status_code == 200

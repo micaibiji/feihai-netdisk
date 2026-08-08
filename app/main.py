@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -24,8 +27,9 @@ from .vault import CredentialVault
 settings = get_settings()
 store = JobStore(settings.database_path)
 vault = CredentialVault(settings.data_dir)
-security = HTTPBasic()
 templates = Jinja2Templates(directory="app/templates")
+SESSION_COOKIE = "feihai_session"
+SESSION_MAX_AGE = 7 * 24 * 60 * 60
 
 
 @asynccontextmanager
@@ -42,7 +46,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.3.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.3.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -69,22 +73,76 @@ async def subscription_worker() -> None:
         await asyncio.sleep(settings.subscription_interval_seconds)
 
 
-def require_login(credentials: HTTPBasicCredentials = Depends(security)) -> str:
-    valid_user = secrets.compare_digest(credentials.username, settings.admin_username)
-    valid_password = secrets.compare_digest(credentials.password, settings.admin_password)
+def create_session_token(username: str, now: int | None = None) -> str:
+    expires_at = (now or int(time.time())) + SESSION_MAX_AGE
+    payload = f"{username}:{expires_at}"
+    key = hashlib.sha256(settings.admin_password.encode("utf-8")).digest()
+    signature = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def validate_session_token(token: str | None, now: int | None = None) -> str | None:
+    if not token:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
+        username, expires_at_raw, signature = decoded.rsplit(":", 2)
+        payload = f"{username}:{expires_at_raw}"
+        key = hashlib.sha256(settings.admin_password.encode("utf-8")).digest()
+        expected = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        if int(expires_at_raw) < (now or int(time.time())):
+            return None
+        if not secrets.compare_digest(username, settings.admin_username):
+            return None
+        return username
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def require_login(request: Request) -> str:
+    username = validate_session_token(request.cookies.get(SESSION_COOKIE))
+    if not username:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    return username
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if validate_session_token(request.cookies.get(SESSION_COOKIE)):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request=request, name="login.html", context={"app_name": settings.app_name, "error": ""})
+
+
+@app.post("/login", response_class=HTMLResponse)
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    valid_user = secrets.compare_digest(username, settings.admin_username)
+    valid_password = secrets.compare_digest(password, settings.admin_password)
     if not (valid_user and valid_password):
-        raise HTTPException(status_code=401, detail="账号或密码错误", headers={"WWW-Authenticate": "Basic"})
-    return credentials.username
+        return templates.TemplateResponse(request=request, name="login.html", context={"app_name": settings.app_name, "error": "账号或密码不正确"}, status_code=401)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(SESSION_COOKIE, create_session_token(username), max_age=SESSION_MAX_AGE, httponly=True, samesite="lax", secure=False, path="/")
+    return response
+
+
+@app.post("/logout")
+def logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, _: str = Depends(require_login)):
+def dashboard(request: Request):
+    if not validate_session_token(request.cookies.get(SESSION_COOKIE)):
+        return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(request=request, name="index.html", context={"app_name": settings.app_name})
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.3.0", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.3.1", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.get("/api/overview")
