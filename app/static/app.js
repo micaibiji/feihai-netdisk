@@ -1,97 +1,62 @@
-const providerGrid = document.querySelector('#providerGrid');
-const jobList = document.querySelector('#jobList');
-const message = document.querySelector('#message');
-const searchResults = document.querySelector('#searchResults');
-const subscriptionList = document.querySelector('#subscriptionList');
+const app=document.querySelector('#app'),modalRoot=document.querySelector('#modalRoot');
+const state={page:'home',overview:null,query:'',search:null,provider:'all'};
+const pm={'115':{label:'115网盘',short:'115',color:'#2f66ff'},baidu:{label:'百度网盘',short:'百',color:'#4169e1'},quark:{label:'夸克网盘',short:'夸',color:'#1c2530'},china_mobile:{label:'中国移动云盘',short:'移',color:'#17a4df'}};
+const titles={search:['全网资源搜索','同时搜索影视作品、Telegram 频道与四个网盘来源。'],following:['我的追更','一个影视可保留多个网盘来源，自动使用最新可用来源。'],library:['飞牛影视媒体库','统一命名、STRM、字幕、封面和 NFO 的整理中心。'],accounts:['网盘账号','按 115、百度、夸克、移动顺序管理授权。'],risk:['风险中心','检测授权失效、访问受限和网关异常，不绕过网盘风控。'],settings:['设置','Telegram、元数据、命名规则与飞牛影视目录。']};
+const esc=(v='')=>{const n=document.createElement('div');n.textContent=String(v);return n.innerHTML};
+const date=v=>{if(!v)return'尚未检查';try{return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(v))}catch{return v}};
+function toast(msg,type='ok'){const e=document.createElement('div');e.className=`toast ${type}`;e.innerHTML=`<i>${type==='ok'?'✓':'!'}</i>${esc(msg)}`;document.querySelector('#toastRoot').append(e);setTimeout(()=>e.remove(),3000)}
+async function api(url,opt={}){const cleanUrl=new URL(url,location.origin);const r=await fetch(cleanUrl,{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});let b={};try{b=await r.json()}catch{}if(!r.ok)throw Error(b.detail||`请求失败 ${r.status}`);return b}
+async function boot(){try{state.overview=await api('/api/overview');document.querySelector('#systemState span').textContent='系统正常';render()}catch(e){document.querySelector('#systemState span').textContent='需要检查';app.innerHTML=`<section class="error-card"><h1>启动信息读取失败</h1><p>${esc(e.message)}</p><button class="primary" onclick="location.reload()">重新加载</button></section>`}}
+function nav(page){state.page=page;document.querySelectorAll('[data-page]').forEach(e=>e.classList.toggle('active',e.dataset.page===page));render();scrollTo({top:0,behavior:'smooth'})}
+document.addEventListener('click',e=>{const t=e.target.closest('[data-page]');if(t)nav(t.dataset.page)});
+document.querySelector('#globalSearch').onsubmit=e=>{e.preventDefault();state.query=new FormData(e.currentTarget).get('q').trim();nav('search');search()};
 
-const labels = {
-  queued: '排队中',
-  waiting_auth: '等待配置',
-  completed: '已完成',
-  failed: '失败',
-};
+function render(){if(state.page==='home')return home();const [a,b]=titles[state.page];app.innerHTML=`<header class="page-heading"><div><span>飞海网盘 · FNOS</span><h1>${a}</h1><p>${b}</p></div><em>数据保存在本机 NAS</em></header>${({search:searchPage,following,library,accounts,risk,settings}[state.page])()}`;bind()}
+function providerCards(){return state.overview.providers.map(x=>{const m=pm[x.name],ok=x.configured;return `<button class="provider-mini" data-page="accounts"><i style="background:${m.color}">${m.short}</i><span><b>${m.label}</b><small>${ok?(x.account_mask||'已连接'):'等待授权'}</small></span><em class="${x.risk_status==='normal'?'ok':x.risk_status.includes('unreachable')?'warn':'muted'}">${x.risk_status==='normal'?'正常':ok?'待检测':'未连接'}</em></button>`}).join('')}
+function poster(x){const pic=x.poster?`<img src="${esc(x.poster)}" alt="${esc(x.title)}" loading="lazy">`:`<div class="poster-placeholder"><span>${esc((x.title||'影')[0])}</span><small>飞海网盘</small></div>`;return `<button class="movie-card" data-movie='${esc(JSON.stringify(x))}'><div class="poster">${pic}<span class="rank">#${x.rank||'·'}</span><span class="score">★ ${x.score||'—'}</span><div class="poster-hover">查看详情</div></div><h3>${esc(x.title)}</h3><p>${esc(x.year||'待定')} · ${x.media_type==='movie'?'电影':'剧集'}</p></button>`}
+function home(){const r=state.overview.ranking,x=r.items||[],hero=x[0]||{};app.innerHTML=`<section class="hero" ${hero.backdrop?`style="background-image:url('${esc(hero.backdrop)}')"`:''}><div class="hero-shade"></div><div class="hero-copy"><span>今日热榜 · TOP 1</span><h1>${esc(hero.title||'飞海网盘')}</h1><p class="meta">${esc(hero.year||'')} · ${hero.media_type==='movie'?'电影':'剧集'} · TMDB ${hero.score||'—'} 分</p><p>${esc(hero.overview||'从资源搜索、自动追更、统一整理到飞牛影视，一套流程完成。')}</p><div><button class="primary" data-movie='${esc(JSON.stringify(hero))}'>查看与搜索资源</button><button class="glass" data-follow-title="${esc(hero.title||'')}" data-follow-type="${hero.media_type||'tv'}">+ 订阅追更</button></div></div><div class="hero-badge"><b>${r.live?'实时':'演示'}</b><span>${r.live?'TMDB 当日榜单':'配置 TMDB 密钥后启用实时榜单'}</span></div></section><section class="provider-strip"><header><div><span>网盘连接</span><small>独立使用，不进行跨盘秒传</small></div><button data-page="accounts">管理账号 →</button></header><div class="provider-grid">${providerCards()}</div></section><section class="content-section"><header class="section-head"><div><span>实时影视排行</span><h2>发现值得看的内容</h2></div><div class="segments">${[['all','最近热门'],['movie','电影'],['tv','剧集']].map(([k,v])=>`<button data-ranking="${k}" class="${k==='all'?'active':''}">${v}</button>`).join('')}</div></header><div class="poster-grid">${x.map(poster).join('')}</div></section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>多来源比较最新集数与时间；失败或受限时自动切换备用来源。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>◎</i><b>选择最新</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;bind()}
 
-async function loadProviders() {
-  const response = await fetch('/api/providers');
-  const providers = await response.json();
-  providerGrid.innerHTML = providers.map(item => `
-    <article class="provider">
-      <strong>${item.label}</strong>
-      <span class="state ${item.configured ? 'ready' : ''}">${item.configured ? '已连接' : '等待授权'}</span>
-    </article>
-  `).join('');
+function searchPage(){return `<section class="search-panel"><form id="resourceSearch"><span>⌕</span><input name="q" value="${esc(state.query)}" placeholder="输入电影、剧集、动漫或综艺名称" required><button class="primary">搜索</button></form><p>搜索 Telegram 与网盘聚合来源，并按最新集数和网盘优先级排序。</p></section><section id="searchOutput">${state.search?results():`<div class="empty-state"><i>⌕</i><h2>搜索全网影视资源</h2><p>例如：庆余年 第二季、哪吒、凡人修仙传</p></div>`}</section>`}
+function results(){const works=state.search.works||[],all=state.search.resources||[],list=state.provider==='all'?all:all.filter(x=>x.provider===state.provider);return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>网盘资源 <em>${all.length}</em></button></div><div class="work-row">${works.slice(0,5).map(poster).join('')||'<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>网盘资源</b>${[['all','全部'],['115','115'],['baidu','百度'],['quark','夸克'],['china_mobile','移动']].map(([k,v])=>`<button data-provider-filter="${k}" class="${state.provider===k?'active':''}">${v}</button>`).join('')}<span>共 ${list.length} 条 · 已去重</span></div><div class="resource-list">${list.map(resource).join('')||'<div class="empty-state compact"><p>没有找到支持网盘的结果。</p></div>'}</div>`}
+function resource(x){const m=pm[x.provider];return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.title)}</h3><p><b>${esc(x.quality)}</b><b>S${String(x.season).padStart(2,'0')}E${String(x.episode).padStart(2,'0')}</b><b>自动去重</b></p></div><div class="resource-status"><span>待验证</span><small>${x.provider==='115'?'优先来源':'备用来源'}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`}
+
+function following(){const xs=state.overview.subscriptions;return `<div class="summary-grid"><article><b>${xs.length}</b><span>正在追更</span></article><article><b>${xs.filter(x=>x.current_episode>0).length}</b><span>已发现更新</span></article><article><b>${xs.reduce((n,x)=>n+x.sources.length,0)}</b><span>全部来源</span></article><button class="primary" id="newFollow">+ 添加追更</button></div><div class="follow-grid">${xs.map(x=>`<article class="follow-card"><header><span class="green-chip">${x.enabled?'追更中':'已暂停'}</span><button data-toggle-follow="${x.id}" data-enabled="${!x.enabled}">${x.enabled?'暂停':'恢复'}</button></header><h2>${esc(x.keyword)}</h2><p>当前最新 <b>S${String(x.season).padStart(2,'0')}E${String(x.current_episode).padStart(2,'0')}</b></p><div class="progress"><i style="width:${Math.min(100,x.current_episode*3)}%"></i></div><div class="source-stack">${x.sources.slice(0,4).map(s=>`<span class="${s.active?'active':''}"><i style="background:${pm[s.provider].color}">${pm[s.provider].short}</i><b>${pm[s.provider].label}</b><em>S${String(s.season).padStart(2,'0')}E${String(s.episode).padStart(2,'0')}</em>${s.active?'<small>当前使用</small>':''}</span>`).join('')||'<p>等待首次搜索来源</p>'}</div><footer><button data-add-source="${x.id}">+ 添加备用链接</button><small>${date(x.last_checked_at)}</small></footer></article>`).join('')||'<div class="empty-state"><i>◎</i><h2>还没有追更</h2><p>添加影视后，系统会定时搜索多个网盘链接并自动选最新。</p><button class="primary" id="newFollow">添加第一个追更</button></div>'}</div>`}
+function library(){return `<section class="library-hero"><div><span>飞牛影视目录</span><h2>${esc(state.overview.settings.fnos_library_path||'/app/strm')}</h2><p>STRM 与 NFO 保存在本机目录，由飞牛影视直接扫描。</p></div><button class="primary" id="previewNaming">查看命名示例</button></section><div class="metric-grid"><article><span>最近任务</span><b>${state.overview.jobs.length}</b><small>任务与整理记录</small></article><article><span>追更影视</span><b>${state.overview.subscriptions.length}</b><small>自动检查更新</small></article><article><span>可用网盘</span><b>${state.overview.providers.filter(x=>x.configured).length}</b><small>已授权账号</small></article><article><span>风控事件</span><b>${state.overview.risk_events.length}</b><small>最近检测记录</small></article></div><section class="naming-card"><div><h3>统一命名规则</h3><pre>电影/流浪地球 (2019)/流浪地球 (2019).strm\n电视剧/庆余年 (2019)/Season 01/\n  庆余年 (2019) - S01E01.strm\n  庆余年 (2019) - S01E01.nfo\n  庆余年 (2019) - S01E01.zh-CN.srt</pre></div><div><h3>最近活动</h3>${state.overview.jobs.slice(0,6).map(j=>`<p><i class="${j.status}"></i><span><b>${esc(j.title)}</b><small>${esc(j.detail.message||j.kind)}</small></span><time>${date(j.created_at)}</time></p>`).join('')||'<p>暂无任务</p>'}</div></section>`}
+function accounts(){return `<section class="accounts-intro"><div><h2>网盘一键授权与扫码登录</h2><p>凭证加密保存在飞牛 NAS，不上传到外部服务器。</p></div><span><i></i>${state.overview.providers.filter(x=>x.configured).length} / 4 已连接</span></section><div class="accounts-grid">${state.overview.providers.map(x=>{const m=pm[x.name],ok=x.configured;return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask||'尚未授权')}</p></span><em class="${ok?'connected':'offline'}">${ok?'已连接':'未连接'}</em></header><dl><div><dt>授权方式</dt><dd>${esc(x.auth_method||'等待配置')}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status||'未检测')}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name)+1} 位</dd></div></dl><footer><button data-auth="${x.name}">${ok?'重新授权':'扫码 / 一键授权'}</button><button data-manual-auth="${x.name}" class="primary">本机凭证</button></footer></article>`}).join('')}</div><aside class="security-note"><span>⌾</span><div><b>本机加密存储</b><p>网盘凭证使用 NAS 本机密钥加密；页面与日志只显示脱敏账号。正式扫码依赖官方 OAuth 或本机 OpenList 网关。</p></div></aside>`}
+function risk(){const xs=state.overview.providers,n=xs.filter(x=>x.risk_status==='normal').length;return `<section class="risk-hero"><div class="risk-score"><b>${n===xs.length?'A':'B'}</b><small>当前评级</small></div><div><span>网盘风控检测</span><h2>${n} 个正常 · ${xs.length-n} 个待检查</h2><p>异常时停止或降频，保留原来源并发送 Telegram 通知。</p></div><button class="primary" id="riskScan">立即检测</button></section><div class="risk-stats">${[['green','正常账号',n],['orange','待检查',xs.length-n],['red','已阻断',xs.filter(x=>x.risk_status==='blocked').length],['blue','备用来源',state.overview.subscriptions.reduce((a,x)=>a+Math.max(0,x.sources.length-1),0)]].map(x=>`<article><i class="${x[0]}"></i><span>${x[1]}</span><b>${x[2]}</b></article>`).join('')}</div><section class="risk-table"><header><h3>最近检测记录</h3><span>不会绕过验证码或频率限制</span></header>${state.overview.risk_events.map(x=>`<div><i class="${x.level}">${x.level==='safe'?'✓':'!'}</i><span><b>${pm[x.provider]?.label||'系统'}</b><small>${esc(x.event_type)}</small></span><p>${esc(x.message)}</p><em>${esc(x.action)}</em><time>${date(x.created_at)}</time></div>`).join('')||'<div class="empty-row">点击“立即检测”生成第一份风险报告。</div>'}</section>`}
+function settings(){const s={telegram_enabled:true,auto_metadata:true,auto_subtitles:true,auto_organize:true,fnos_library_path:'/app/strm',naming_language:'zh-CN',...state.overview.settings};return `<form id="settingsForm" class="settings-grid"><section class="settings-card"><header><i>↗</i><div><h3>Telegram 通知</h3><p>追更、入库失败和风控异常提醒</p></div></header><label class="toggle-row"><span><b>启用通知</b><small>Bot Token 与 Chat ID 从部署配置读取</small></span><input type="checkbox" name="telegram_enabled" ${s.telegram_enabled?'checked':''}><i></i></label><button type="button" id="testNotify">发送测试通知</button></section><section class="settings-card"><header><i>✦</i><div><h3>自动整理</h3><p>元数据、字幕、封面与统一命名</p></div></header>${[['auto_metadata','自动匹配 TMDB 信息'],['auto_subtitles','自动整理中文字幕'],['auto_organize','入库后自动生成 STRM / NFO']].map(([n,l])=>`<label class="toggle-row"><span><b>${l}</b></span><input type="checkbox" name="${n}" ${s[n]?'checked':''}><i></i></label>`).join('')}</section><section class="settings-card full"><header><i>▦</i><div><h3>飞牛影视与命名规则</h3><p>保存后只影响后续任务，不自动移动已有文件</p></div></header><label class="field"><span>飞牛影视映射目录</span><input name="fnos_library_path" value="${esc(s.fnos_library_path)}"></label><label class="field"><span>元数据语言</span><select name="naming_language"><option value="zh-CN">简体中文</option></select></label><div class="path-preview">电视剧/庆余年 (2019)/Season 01/庆余年 (2019) - S01E01.strm</div><button class="primary save-settings">保存设置</button></section></form>`}
+
+function bind(){
+ document.querySelectorAll('[data-movie]').forEach(e=>e.onclick=()=>movie(JSON.parse(e.dataset.movie)));
+ document.querySelectorAll('[data-follow-title]').forEach(e=>e.onclick=()=>quickFollow(e.dataset.followTitle,e.dataset.followType));
+ document.querySelectorAll('[data-ranking]').forEach(e=>e.onclick=async()=>{try{state.overview.ranking=await api(`/api/tmdb/trending?media_type=${e.dataset.ranking}`);home()}catch(x){toast(x.message,'error')}});
+ const sf=document.querySelector('#resourceSearch');if(sf)sf.onsubmit=e=>{e.preventDefault();state.query=new FormData(sf).get('q').trim();search()};
+ document.querySelectorAll('[data-provider-filter]').forEach(e=>e.onclick=()=>{state.provider=e.dataset.providerFilter;render()});
+ document.querySelectorAll('[data-copy]').forEach(e=>e.onclick=()=>navigator.clipboard.writeText(e.dataset.copy).then(()=>toast('链接已复制')));
+ document.querySelectorAll('[data-intake]').forEach(e=>e.onclick=()=>intake(JSON.parse(e.dataset.intake)));
+ document.querySelectorAll('#newFollow').forEach(e=>e.onclick=newFollow);
+ document.querySelectorAll('[data-add-source]').forEach(e=>e.onclick=()=>addSource(Number(e.dataset.addSource)));
+ document.querySelectorAll('[data-toggle-follow]').forEach(e=>e.onclick=async()=>{await api(`/api/subscriptions/${e.dataset.toggleFollow}?enabled=${e.dataset.enabled}`,{method:'PATCH'});await refresh('追更状态已更新')});
+ document.querySelectorAll('[data-auth]').forEach(e=>e.onclick=()=>startAuth(e.dataset.auth));
+ document.querySelectorAll('[data-manual-auth]').forEach(e=>e.onclick=()=>manualAuth(e.dataset.manualAuth));
+ const rs=document.querySelector('#riskScan');if(rs)rs.onclick=runRisk;
+ const pn=document.querySelector('#previewNaming');if(pn)pn.onclick=showNaming;
+ const set=document.querySelector('#settingsForm');if(set)set.onsubmit=saveSettings;
+ const nt=document.querySelector('#testNotify');if(nt)nt.onclick=testNotify;
 }
-
-async function loadJobs() {
-  const response = await fetch('/api/jobs');
-  const jobs = await response.json();
-  jobList.innerHTML = jobs.length ? jobs.map(job => `
-    <article class="job">
-      <div><strong>${escapeHtml(job.title)}</strong><p>${escapeHtml(job.detail.message || job.kind)}</p></div>
-      <span class="status">${labels[job.status] || job.status}</span>
-    </article>
-  `).join('') : '<p class="empty">还没有任务。</p>';
-}
-
-async function loadSubscriptions() {
-  const response = await fetch('/api/subscriptions');
-  const items = await response.json();
-  subscriptionList.innerHTML = items.length ? items.map(item => `
-    <article class="job"><div><strong>${escapeHtml(item.keyword)}</strong><p>${item.last_checked_at ? '最近检查：' + escapeHtml(item.last_checked_at) : '等待首次检查'}</p></div><span class="status">追更中</span></article>
-  `).join('') : '<p class="empty">还没有追更订阅。</p>';
-}
-
-function escapeHtml(value) {
-  const node = document.createElement('div');
-  node.textContent = value;
-  return node.innerHTML;
-}
-
-document.querySelector('#intakeForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const response = await fetch('/api/intake', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(Object.fromEntries(form.entries())),
-  });
-  const result = await response.json();
-  message.textContent = response.ok ? '已加入队列。' : (result.detail || '提交失败');
-  if (response.ok) {
-    event.currentTarget.reset();
-    event.currentTarget.elements.target_folder.value = '影视';
-    await loadJobs();
-  }
-});
-
-document.querySelector('#refreshButton').addEventListener('click', loadJobs);
-
-document.querySelector('#searchForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  const query = new FormData(event.currentTarget).get('q');
-  searchResults.innerHTML = '<p class="empty">正在搜索…</p>';
-  const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-  const items = await response.json();
-  if (!response.ok) { searchResults.innerHTML = `<p class="empty">${escapeHtml(items.detail || '搜索失败')}</p>`; return; }
-  searchResults.innerHTML = items.length ? items.map(item => `
-    <article class="result"><div><span class="provider-pill">${escapeHtml(item.provider_label)}</span><strong>${escapeHtml(item.title)}</strong><br><a href="${item.url}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a></div><button type="button" data-url="${item.url}" data-title="${escapeHtml(item.title)}" class="intake-result">入库</button></article>
-  `).join('') : '<p class="empty">没有找到支持网盘的结果。</p>';
-});
-
-searchResults.addEventListener('click', event => {
-  const button = event.target.closest('.intake-result');
-  if (!button) return;
-  const form = document.querySelector('#intakeForm');
-  form.elements.title.value = button.dataset.title;
-  form.elements.share_url.value = button.dataset.url;
-  form.scrollIntoView({behavior: 'smooth'});
-});
-
-document.querySelector('#subscriptionForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  const keyword = new FormData(event.currentTarget).get('keyword');
-  const response = await fetch('/api/subscriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({keyword, auto_intake:true})});
-  if (response.ok) { event.currentTarget.reset(); await loadSubscriptions(); }
-});
-
-Promise.all([loadProviders(), loadJobs(), loadSubscriptions()]).catch(error => { message.textContent = error.message; });
+async function search(){const out=document.querySelector('#searchOutput');if(out)out.innerHTML='<div class="empty-state"><span class="spinner"></span><h2>正在并行搜索</h2><p>Telegram、网盘和 TMDB</p></div>';try{state.search=await api(`/api/search?q=${encodeURIComponent(state.query)}`);render()}catch(e){out.innerHTML=`<div class="error-card"><h2>搜索未完成</h2><p>${esc(e.message)}</p></div>`}}
+async function quickFollow(title,type='tv'){if(!title)return;try{await api('/api/subscriptions',{method:'POST',body:JSON.stringify({keyword:title,auto_intake:true,media_type:type==='movie'?'movie':'tv'})});await refresh(`已订阅追更：${title}`);nav('following')}catch(e){toast(e.message,'error')}}
+function movie(x){modalRoot.innerHTML=`<div class="modal-backdrop"><section class="detail-modal"><button class="modal-close">×</button><div class="detail-visual">${x.backdrop?`<img src="${esc(x.backdrop)}">`:''}<div></div><span><small>影视详情</small><h2>${esc(x.title||'未知影视')}</h2><p>${esc(x.year||'')} · ${x.media_type==='movie'?'电影':'剧集'} · TMDB ${x.score||'—'}</p><p>${esc(x.overview||'暂无简介')}</p></span></div><footer><button class="search-this">搜索网盘资源</button><button class="primary follow-this">+ 订阅追更</button></footer></section></div>`;modalRoot.querySelector('.modal-close').onclick=close;modalRoot.querySelector('.search-this').onclick=()=>{state.query=x.title;close();nav('search');search()};modalRoot.querySelector('.follow-this').onclick=()=>{close();quickFollow(x.title,x.media_type)}}
+function newFollow(){formModal('添加自动追更',`<label>影视名称<input name="keyword" required placeholder="例如：庆余年 第二季"></label><label>类型<select name="media_type"><option value="tv">电视剧</option><option value="movie">电影</option><option value="anime">动漫</option><option value="variety">综艺</option></select></label><label>年份（可选）<input name="year" type="number" min="1900" max="2200"></label>`,async d=>{d.auto_intake=true;if(!d.year)delete d.year;else d.year=Number(d.year);await api('/api/subscriptions',{method:'POST',body:JSON.stringify(d)});await refresh('追更已添加')})}
+function addSource(id){formModal('添加备用网盘链接',`<label>分享链接<input name="share_url" type="url" required placeholder="115、百度、夸克或移动网盘链接"></label><div class="form-pair"><label>季<input name="season" type="number" value="1" min="0"></label><label>最新集<input name="episode" type="number" value="0" min="0"></label></div><label>资源标题<input name="title" placeholder="用于自动识别画质和集数"></label>`,async d=>{d.season=Number(d.season);d.episode=Number(d.episode);await api(`/api/subscriptions/${id}/sources`,{method:'POST',body:JSON.stringify(d)});await refresh('备用来源已添加，已重新选择最新来源')})}
+function intake(x){formModal('一键入库',`<div class="chosen-resource"><i style="background:${pm[x.provider].color}">${pm[x.provider].short}</i><span><b>${esc(x.title)}</b><small>${esc(x.url)}</small></span></div><label>影视名称<input name="title" value="${esc(state.query||x.title)}" required></label><input type="hidden" name="share_url" value="${esc(x.url)}"><label>目标目录<input name="target_folder" value="影视"></label>`,async d=>{d.auto_organize=true;await api('/api/intake',{method:'POST',body:JSON.stringify(d)});await refresh('已加入独立网盘处理队列')})}
+async function startAuth(p){try{const x=await api(`/api/providers/${p}/auth/start`,{method:'POST'}),m=pm[p];modalRoot.innerHTML=`<div class="modal-backdrop"><section class="auth-modal"><button class="modal-close">×</button><i class="auth-logo" style="background:${m.color}">${m.short}</i><h2>${m.label}授权</h2><p>${esc(x.message)}</p>${x.ready?`<a class="primary auth-link" href="${esc(x.url)}" target="_blank" rel="noreferrer">打开授权页面</a><small>完成授权后，使用“本机凭证”确认账号。</small>`:`<div class="setup-box">尚未配置授权网关。请先在部署设置中填写官方 OAuth 或本机 OpenList 地址。</div>`}</section></div>`;modalRoot.querySelector('.modal-close').onclick=close}catch(e){toast(e.message,'error')}}
+function manualAuth(p){formModal(`${pm[p].label}本机凭证`,`<aside class="form-warning">凭证将使用 NAS 本机密钥加密，不显示在页面、日志或 GitHub 中。</aside><label>脱敏账号名称<input name="account_mask" placeholder="例如：飞海的115"></label><label>Token / Cookie<textarea name="credential" required minlength="6" placeholder="仅在无法使用官方扫码时填写"></textarea></label>`,async d=>{await api(`/api/providers/${p}/credential`,{method:'POST',body:JSON.stringify(d)});await refresh(`${pm[p].label}已连接`)})}
+function showNaming(){modalRoot.innerHTML=`<div class="modal-backdrop"><section class="form-modal"><button class="modal-close">×</button><h2>飞牛影视命名示例</h2><div class="tree-preview"><b>电视剧 / 庆余年 (2019) /</b><span>Season 01 /</span><em>庆余年 (2019) - S01E01.strm</em><em>庆余年 (2019) - S01E01.nfo</em><em>庆余年 (2019) - S01E01.zh-CN.srt</em><span>poster.jpg · fanart.jpg · tvshow.nfo</span></div></section></div>`;modalRoot.querySelector('.modal-close').onclick=close}
+function formModal(title,fields,submit){modalRoot.innerHTML=`<div class="modal-backdrop"><form class="form-modal"><button type="button" class="modal-close">×</button><h2>${title}</h2>${fields}<p class="form-error"></p><button class="primary submit-modal">确认</button></form></div>`;const f=modalRoot.querySelector('form');f.querySelector('.modal-close').onclick=close;f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('.submit-modal');b.disabled=true;b.textContent='正在处理…';try{await submit(Object.fromEntries(new FormData(f)));close()}catch(x){f.querySelector('.form-error').textContent=x.message;b.disabled=false;b.textContent='确认'}}}
+function close(){modalRoot.innerHTML=''}
+async function runRisk(){const b=document.querySelector('#riskScan');b.disabled=true;b.textContent='正在检测…';try{await api('/api/providers/risk-scan',{method:'POST'});await refresh('风控检测完成')}catch(e){toast(e.message,'error')}}
+async function saveSettings(e){e.preventDefault();const f=e.currentTarget,d=Object.fromEntries(new FormData(f));['telegram_enabled','auto_metadata','auto_subtitles','auto_organize'].forEach(n=>d[n]=f.elements[n].checked);try{await api('/api/settings',{method:'PUT',body:JSON.stringify(d)});await refresh('设置已保存')}catch(x){toast(x.message,'error')}}
+async function testNotify(){try{const x=await api('/api/notify',{method:'POST',body:JSON.stringify({message:'飞海网盘测试通知：飞牛 NAS 连接正常。'})});toast(x.configured?'测试通知已发送':'尚未配置 Telegram Bot',x.configured?'ok':'error')}catch(e){toast(e.message,'error')}}
+async function refresh(msg){state.overview=await api('/api/overview');render();if(msg)toast(msg)}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')close()});boot();

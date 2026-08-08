@@ -20,6 +20,10 @@ class Settings:
     pansou_base_url: str
     provider_priority: tuple[str, ...]
     subscription_interval_seconds: int
+    public_base_url: str = ""
+    baidu_client_id: str = ""
+    baidu_redirect_uri: str = ""
+    openlist_url: str = ""
 
     @property
     def database_path(self) -> Path:
@@ -47,4 +51,8 @@ def get_settings() -> Settings:
         subscription_interval_seconds=max(
             300, int(os.getenv("SUBSCRIPTION_INTERVAL_SECONDS", "1800"))
         ),
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").rstrip("/"),
+        baidu_client_id=os.getenv("BAIDU_CLIENT_ID", ""),
+        baidu_redirect_uri=os.getenv("BAIDU_REDIRECT_URI", ""),
+        openlist_url=os.getenv("OPENLIST_URL", "").rstrip("/"),
     )

@@ -25,16 +25,10 @@ class Provider:
 
 PROVIDERS = (
     Provider(
-        ProviderName.CHINA_MOBILE,
-        "中国移动云盘",
-        ("yun.139.com", "caiyun.139.com"),
-        "CHINA_MOBILE_TOKEN",
-    ),
-    Provider(
-        ProviderName.QUARK,
-        "夸克网盘",
-        ("pan.quark.cn", "drive.quark.cn"),
-        "QUARK_COOKIE",
+        ProviderName.PAN115,
+        "115网盘",
+        ("115.com", "115cdn.com"),
+        "115_ACCESS_TOKEN",
     ),
     Provider(
         ProviderName.BAIDU,
@@ -43,10 +37,16 @@ PROVIDERS = (
         "BAIDU_ACCESS_TOKEN",
     ),
     Provider(
-        ProviderName.PAN115,
-        "115网盘",
-        ("115.com", "115cdn.com"),
-        "115_ACCESS_TOKEN",
+        ProviderName.QUARK,
+        "夸克网盘",
+        ("pan.quark.cn", "drive.quark.cn"),
+        "QUARK_COOKIE",
+    ),
+    Provider(
+        ProviderName.CHINA_MOBILE,
+        "中国移动云盘",
+        ("yun.139.com", "caiyun.139.com"),
+        "CHINA_MOBILE_TOKEN",
     ),
 )
 
@@ -57,7 +57,7 @@ class ProviderRegistry:
         for provider in PROVIDERS:
             if provider.matches(url):
                 return provider
-        raise ValueError("暂不支持这个分享链接，请使用移动、夸克、百度或115网盘链接")
+        raise ValueError("暂不支持这个分享链接，请使用115、百度、夸克或移动网盘链接")
 
     @staticmethod
     def states() -> list[dict[str, str | bool]]:

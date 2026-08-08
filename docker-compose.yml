@@ -8,12 +8,14 @@ services:
     ports:
       - "12366:12366"
     volumes:
+      - ./app:/app/app:ro
       - ${FEIHAI_DATA_PATH:-./data}:/app/data
       - ${FNTV_STRM_PATH:-./strm}:/app/strm
     security_opt:
       - no-new-privileges:true
     depends_on:
       - pansou
+      - openlist
 
   pansou:
     image: ghcr.io/fish2018/pansou:latest
@@ -26,6 +28,18 @@ services:
       PLUGIN_TIMEOUT: "20"
     volumes:
       - pansou-cache:/app/cache
+
+  openlist:
+    image: openlistteam/openlist:latest
+    container_name: feihai-openlist
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      UMASK: "022"
+    ports:
+      - "5244:5244"
+    volumes:
+      - ${OPENLIST_DATA_PATH:-./openlist}:/opt/openlist/data
 
 volumes:
   pansou-cache:

@@ -39,6 +39,31 @@ class NotifyRequest(BaseModel):
 class SubscriptionRequest(BaseModel):
     keyword: str = Field(min_length=1, max_length=100)
     auto_intake: bool = True
+    media_type: str = Field(default="tv", pattern="^(movie|tv|anime|variety|documentary)$")
+    year: int | None = Field(default=None, ge=1900, le=2200)
+
+
+class SubscriptionSourceRequest(BaseModel):
+    share_url: HttpUrl
+    title: str = Field(default="", max_length=300)
+    season: int = Field(default=1, ge=0, le=200)
+    episode: int = Field(default=0, ge=0, le=10000)
+    quality: str = Field(default="", max_length=80)
+    source: str = Field(default="manual", max_length=120)
+
+
+class SettingsRequest(BaseModel):
+    telegram_enabled: bool = True
+    auto_metadata: bool = True
+    auto_subtitles: bool = True
+    auto_organize: bool = True
+    fnos_library_path: str = Field(default="/app/strm", max_length=500)
+    naming_language: str = Field(default="zh-CN", max_length=20)
+
+
+class ProviderCredentialRequest(BaseModel):
+    credential: str = Field(min_length=6, max_length=12000)
+    account_mask: str = Field(default="已授权账号", max_length=100)
 
 
 class ResourceResult(BaseModel):
