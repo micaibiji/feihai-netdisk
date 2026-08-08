@@ -24,6 +24,8 @@
 
 ## 飞牛 NAS 快速启动
 
+第一次安装建议直接按 [飞牛 NAS 可视化安装教程](docs/FNOS_INSTALL.md) 操作，包含目录准备、Compose 创建、页面验收、飞牛影视接入、网盘扫码授权和常见问题。
+
 ```bash
 cp .env.example .env
 # 修改 .env，至少设置强管理密码和 NAS 局域网地址
@@ -34,6 +36,8 @@ docker compose up -d --build
 - 本机扫码授权网关：`http://NAS地址:5244`
 
 在飞牛影视中，把 `FNTV_STRM_PATH` 指向的宿主机目录添加为影视库。该目录同时映射到容器的 `/app/strm`。
+
+> 实机验证：v0.3.0 已在飞牛 fnOS 的 Docker Compose 中完成构建，飞海网盘、PanSou 和 OpenList 三个服务均可正常启动；健康检查、资源搜索、统一命名、设置读取和风控扫描均已通过。
 
 建议先建立以下目录：
 
