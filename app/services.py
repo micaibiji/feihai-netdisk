@@ -202,11 +202,11 @@ def provider_auth_start(settings: Settings, provider: str) -> dict[str, Any]:
         query = urlencode({"response_type": "code", "client_id": settings.baidu_client_id, "redirect_uri": settings.baidu_redirect_uri, "scope": "basic,netdisk", "display": "popup", "qrcode": "1"})
         return {"ready": True, "mode": "oauth", "url": f"https://openapi.baidu.com/oauth/2.0/authorize?{query}", "message": "请在百度官方页面授权"}
     if provider in {"115", "quark", "china_mobile"} and settings.openlist_url:
-        return {"ready": True, "mode": "gateway", "url": settings.openlist_url, "message": "在本机 OpenList 中扫码授权，完成后回到这里确认连接"}
+        return {"ready": True, "mode": "gateway", "url": "", "message": "正在准备页面内登录"}
     hints = {
-        "115": "需要先配置本机 OpenList 的 115 扫码驱动",
+        "115": "115 页面内登录尚未就绪",
         "baidu": "需要填写百度开放平台 Client ID 与回调地址",
-        "quark": "需要先配置本机 OpenList 的夸克扫码驱动",
-        "china_mobile": "需要先配置本机 OpenList 的中国移动云盘驱动",
+        "quark": "夸克页面内登录尚未就绪",
+        "china_mobile": "中国移动云盘页面内登录尚未就绪",
     }
     return {"ready": False, "mode": "setup", "url": "", "message": hints[provider]}

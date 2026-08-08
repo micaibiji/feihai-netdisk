@@ -1,6 +1,6 @@
 # 飞海网盘：飞牛 NAS 可视化安装教程
 
-本教程面向飞牛 fnOS 用户，不要求使用命令行。完成后会得到三个服务：飞海网盘管理页、Telegram/网盘聚合搜索服务、本机 OpenList 网盘网关。
+本教程面向飞牛 fnOS 用户，不要求使用命令行。完成后会得到飞海网盘管理页及两个自动运行的后台服务；使用者不需要单独安装或配置网盘连接工具。
 
 ## 先看完整流程
 
@@ -22,7 +22,7 @@ flowchart LR
 
 - 一个只在局域网使用的管理账号与至少 16 位强密码。
 - NAS 的局域网 IP，例如 `192.168.1.20`。
-- 可用端口 `12366` 和 `5244`。
+- 一个可用端口 `12366`；飞海网盘不会再占用其他 NAS 端口。
 - 如需海报与最新影视榜单，准备 TMDB API Key。
 - 如需 Telegram 通知，准备机器人 Token 和 Chat ID。
 
@@ -34,12 +34,11 @@ flowchart LR
    ├─ app/        ← 程序文件
    ├─ data/       ← 数据库、加密密钥、任务记录
    ├─ strm/       ← 交给飞牛影视扫描
-   ├─ openlist/   ← 115、夸克、移动等扫码授权数据
    ├─ .env
    └─ docker-compose.yml
 ```
 
-`program/data`、`program/strm` 和 `program/openlist` 都是 NAS 上的真实目录。重新构建容器不会删除这些目录。
+`program/data` 和 `program/strm` 都是 NAS 上的真实目录。内置网盘连接数据保存在 `program/data/gateway`，重新构建容器不会删除。
 
 ## 二、下载并解压程序
 
@@ -64,12 +63,11 @@ requirements.txt
 
 1. 在 `program` 中复制 `.env.example`。
 2. 把副本重命名为 `.env`；如果文件管理隐藏点文件，可先在电脑上改名再上传。
-3. 用文本编辑器打开 `.env`，至少修改下面四项：
+3. 用文本编辑器打开 `.env`，至少修改下面三项：
 
 ```dotenv
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=换成你自己的至少16位强密码
-OPENLIST_URL=http://你的NAS局域网IP:5244
 PUBLIC_BASE_URL=http://你的NAS局域网IP:12366
 ```
 
@@ -78,7 +76,6 @@ PUBLIC_BASE_URL=http://你的NAS局域网IP:12366
 ```dotenv
 FEIHAI_DATA_PATH=./data
 FNTV_STRM_PATH=./strm
-OPENLIST_DATA_PATH=./openlist
 ```
 
 可选功能按需填写：
@@ -113,10 +110,10 @@ BAIDU_REDIRECT_URI=
 点击 **创建/构建** 后保持窗口打开。正常日志顺序大致如下：
 
 ```text
-openlist Pulling
+gateway Pulling
 feihai-drive Built
 feihai-pansou Started
-feihai-openlist Started
+feihai-gateway Started
 feihai-drive Started
 Exited: 0
 ```
@@ -128,7 +125,7 @@ Exited: 0
 在同一局域网的浏览器打开：
 
 - 飞海网盘：`http://你的NAS局域网IP:12366`
-- OpenList 授权网关：`http://你的NAS局域网IP:5244`
+- 飞牛 NAS 对外只开放飞海网盘的 `12366` 端口；后台服务不占用其他宿主机端口。
 
 打开地址后会显示飞海网盘中文登录页，账号密码就是 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
 
@@ -143,7 +140,7 @@ Exited: 0
 健康检查地址为 `http://你的NAS局域网IP:12366/api/health`。正常结果中应包含：
 
 ```json
-{"status":"ok","name":"飞海网盘","version":"0.4.0","database":true,"strm_writable":true}
+{"status":"ok","name":"飞海网盘","version":"0.4.1","database":true,"strm_writable":true}
 ```
 
 ## 六、网盘授权
@@ -175,10 +172,10 @@ Exited: 0
 
 ## 八、更新版本
 
-1. 先备份 `data`、`strm`、`openlist` 和 `.env`。
+1. 先备份 `data`、`strm` 和 `.env`。
 2. 下载新版 ZIP，只覆盖 `program` 中的程序文件；保留原 `.env`。
 3. 在 Docker → Compose 的项目菜单中选择 **清理**，然后重新 **启动/构建**。
-4. 清理只用于重建容器；确认三个数据目录是外部映射后再操作。
+4. 清理只用于重建容器；确认 `data` 和 `strm` 已映射到宿主机后再操作。
 5. 打开 `/api/health` 检查版本号、数据库和 STRM 写入状态。
 
 ## 九、常见问题
@@ -186,7 +183,7 @@ Exited: 0
 ### 页面打不开
 
 - 确认 Compose 显示三个容器正在运行。
-- 确认 12366、5244 未被其他程序占用。
+- 确认 `12366` 未被其他程序占用。
 - 使用 NAS 局域网 IP，不要填写 `localhost`。
 
 ### 登录一直失败
@@ -213,7 +210,6 @@ Exited: 0
 .env
 data/
 strm/
-openlist/
 ```
 
 只删除容器不会影响外部目录；手动删除这些目录会丢失数据库、授权配置或已生成的 STRM。建议先通过飞牛文件管理移动到回收站，确认备份可用后再彻底删除。

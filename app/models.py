@@ -96,12 +96,6 @@ class DirectoryRequest(BaseModel):
     path: str = Field(default="/", max_length=1000)
 
 
-class OpenListSettingsRequest(BaseModel):
-    url: str = Field(default="", max_length=500)
-    username: str = Field(default="admin", max_length=100)
-    password: str = Field(default="", max_length=500)
-
-
 class ProviderCredentialRequest(BaseModel):
     credential: str = Field(min_length=6, max_length=12000)
     account_mask: str = Field(default="已授权账号", max_length=100)

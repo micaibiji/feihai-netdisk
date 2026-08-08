@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
 from .models import (DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
-                     OpenListSettingsRequest, ProviderCredentialRequest, ResourceValidationRequest,
+                     ProviderCredentialRequest, ResourceValidationRequest,
                      SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
                      TmdbSettingsRequest)
 from .provider_auth import (OpenListClient, ProviderAuthError, deserialize_secret,
@@ -53,7 +53,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -158,7 +158,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.0", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.1", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -213,16 +213,14 @@ def provider_states() -> list[dict]:
 
 
 def openlist_configured() -> bool:
-    stored = store.load_settings()
-    return bool((stored.get("openlist_url") or settings.openlist_url) and vault.load_secret("openlist_password"))
+    return bool(settings.openlist_url and settings.admin_password)
 
 
 def openlist_client() -> OpenListClient:
-    stored = store.load_settings()
     return OpenListClient(
-        str(stored.get("openlist_url") or settings.openlist_url),
-        str(stored.get("openlist_username") or "admin"),
-        vault.load_secret("openlist_password"),
+        settings.openlist_url,
+        "admin",
+        settings.admin_password,
     )
 
 
@@ -533,20 +531,6 @@ async def test_tmdb(_: str = Depends(require_login)):
     return {"connected": True, "updated_at": ranking["updated_at"], "items": len(ranking["items"])}
 
 
-@app.put("/api/settings/openlist")
-async def update_openlist(payload: OpenListSettingsRequest, _: str = Depends(require_login)):
-    password = payload.password or vault.load_secret("openlist_password")
-    client = OpenListClient(payload.url, payload.username, password)
-    try:
-        result = await client.test()
-    except (ProviderAuthError, httpx.HTTPError) as error:
-        raise HTTPException(400, f"OpenList 连接失败：{error}") from error
-    if payload.password:
-        vault.save_secret("openlist_password", payload.password)
-    store.save_settings({"openlist_url": payload.url.rstrip("/"), "openlist_username": payload.username})
-    return result
-
-
 @app.post("/api/providers/{provider}/directories")
 async def provider_directories(provider: str, payload: DirectoryRequest, _: str = Depends(require_login)):
     if provider not in {item.name.value for item in PROVIDERS}:
@@ -555,7 +539,7 @@ async def provider_directories(provider: str, payload: DirectoryRequest, _: str 
     if not account["configured"]:
         raise HTTPException(409, f"请先授权 {account['label']}")
     if not openlist_configured():
-        raise HTTPException(409, "请先在设置中连接本机 OpenList，才能逐级读取真实目录")
+        raise HTTPException(503, "网盘连接服务尚未就绪，请稍后重试")
     mount_root = f"/{account['label']}"
     requested = payload.path or mount_root
     if requested == "/":
@@ -565,7 +549,7 @@ async def provider_directories(provider: str, payload: DirectoryRequest, _: str 
     try:
         directories = await openlist_client().list_directories(requested)
     except (ProviderAuthError, httpx.HTTPError) as error:
-        raise HTTPException(502, f"读取目录失败：{error}") from error
+        raise HTTPException(502, "读取网盘目录失败，内部连接服务暂时不可用") from error
     return {"provider": provider, "root": mount_root, "path": requested,
             "directories": directories}
 

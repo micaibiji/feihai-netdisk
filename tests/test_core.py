@@ -182,3 +182,18 @@ def test_generic_secrets_are_encrypted_at_rest(tmp_path: Path):
 def test_115_empty_long_poll_payload_is_still_waiting():
     assert parse_115_qr_state({"state": 1, "code": 0, "data": {}}) == ("waiting", "等待扫码")
     assert parse_115_qr_state({"data": {"status": "1"}})[0] == "scanned"
+
+
+def test_settings_hide_internal_gateway_and_link_tmdb_guide():
+    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "OpenList 地址" not in javascript
+    assert 'id="openlistForm"' not in javascript
+    assert "https://www.themoviedb.org/settings/api" in javascript
+    assert "填写教程" in javascript
+
+
+def test_compose_only_publishes_the_feihai_port():
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    assert '"12366:12366"' in compose
+    assert '"5244:5244"' not in compose
+    assert '"8888:8888"' not in compose
