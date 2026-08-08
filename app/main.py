@@ -7,7 +7,9 @@ import hmac
 import os
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
@@ -16,12 +18,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
-from .models import (IntakeRequest, JobStatus, NotifyRequest, ProviderCredentialRequest,
-                     SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest)
+from .models import (DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
+                     OpenListSettingsRequest, ProviderCredentialRequest, ResourceValidationRequest,
+                     SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
+                     TmdbSettingsRequest)
+from .provider_auth import (OpenListClient, ProviderAuthError, deserialize_secret,
+                            poll_115_qr, serialize_secret, start_115_qr)
 from .providers import PROVIDERS, ProviderRegistry
 from .services import (create_media_bundle, generate_strm, media_relative_path, provider_auth_start,
                        search_resources, search_tmdb, send_notifications, trending_tmdb)
 from .storage import JobStore
+from .validation import validate_share_url
 from .vault import CredentialVault
 
 settings = get_settings()
@@ -46,7 +53,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.3.2", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -60,6 +67,15 @@ async def subscription_worker() -> None:
                 results = await search_resources(settings, subscription["keyword"])
                 new_count = 0
                 for item in results[:30]:
+                    record = store.upsert_resource(item)
+                    validation = await validate_share_url(item["url"])
+                    store.update_resource_validation(
+                        record["fingerprint"], state=validation.state, reason=validation.reason,
+                        checked_at=validation.checked_at, recheck_after=validation.recheck_after,
+                    )
+                    if validation.state != "valid":
+                        continue
+                    item["risk_status"] = "normal"
                     selected = store.add_subscription_source(subscription["id"], item, settings.provider_priority)
                     if store.mark_seen(subscription["id"], item["fingerprint"]):
                         new_count += 1
@@ -142,7 +158,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.3.2", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.0", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -159,11 +175,19 @@ async def verify_password(request: Request, _: str = Depends(require_login)):
 
 @app.get("/api/overview")
 async def overview(_: str = Depends(require_login)):
-    ranking = await trending_tmdb(settings)
+    ranking = await current_trending()
     subscriptions = store.list_subscriptions()
     accounts = provider_states()
     jobs = store.list(20)
-    return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs, "risk_events": store.list_risk_events(8), "settings": store.load_settings()}
+    ui_settings = store.load_settings()
+    current_tmdb = tmdb_config()
+    ui_settings.update({"tmdb_configured": bool(current_tmdb["api_key"]),
+                        "tmdb_language": current_tmdb["language"],
+                        "tmdb_region": current_tmdb["region"],
+                        "tmdb_ranking_window": current_tmdb["window"],
+                        "openlist_configured": openlist_configured()})
+    return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
+            "risk_events": store.list_risk_events(8), "settings": ui_settings}
 
 
 def provider_states() -> list[dict]:
@@ -173,8 +197,50 @@ def provider_states() -> list[dict]:
         item = records[provider.name.value]
         environment_ready = bool(os.getenv(provider.credential_env, "").strip())
         connected = environment_ready or vault.configured(provider.name.value) or item["state"] == "connected"
-        output.append({**item, "name": provider.name.value, "label": provider.label, "configured": connected, "state": "connected" if connected else item["state"]})
+        available_methods = list(provider.auth_methods)
+        # Gateway driver setup is not presented as an in-page login until its QR/password
+        # exchange can be completed and confirmed through this application.
+        for unfinished in ("gateway_qr", "gateway_password"):
+            if unfinished in available_methods:
+                available_methods.remove(unfinished)
+        if "oauth" in available_methods and not (settings.baidu_client_id and settings.baidu_redirect_uri):
+            available_methods.remove("oauth")
+        output.append({**item, "name": provider.name.value, "label": provider.label,
+                       "configured": connected, "state": "connected" if connected else item["state"],
+                       "auth_methods": available_methods,
+                       "setup_required": not available_methods})
     return output
+
+
+def openlist_configured() -> bool:
+    stored = store.load_settings()
+    return bool((stored.get("openlist_url") or settings.openlist_url) and vault.load_secret("openlist_password"))
+
+
+def openlist_client() -> OpenListClient:
+    stored = store.load_settings()
+    return OpenListClient(
+        str(stored.get("openlist_url") or settings.openlist_url),
+        str(stored.get("openlist_username") or "admin"),
+        vault.load_secret("openlist_password"),
+    )
+
+
+def tmdb_config() -> dict[str, str]:
+    stored = store.load_settings()
+    return {
+        "api_key": vault.load_secret("tmdb_api_key") or settings.tmdb_api_key,
+        "language": str(stored.get("tmdb_language") or "zh-CN"),
+        "region": str(stored.get("tmdb_region") or "CN"),
+        "window": str(stored.get("tmdb_ranking_window") or "day"),
+    }
+
+
+async def current_trending(media_type: str = "all") -> dict:
+    config = tmdb_config()
+    return await trending_tmdb(settings, media_type, api_key=config["api_key"],
+                               language=config["language"], region=config["region"],
+                               window=config["window"])
 
 
 @app.get("/api/providers")
@@ -183,12 +249,64 @@ def providers(_: str = Depends(require_login)):
 
 
 @app.post("/api/providers/{provider}/auth/start")
-def start_provider_auth(provider: str, _: str = Depends(require_login)):
+async def start_provider_auth(provider: str, _: str = Depends(require_login)):
     if provider not in {item.name.value for item in PROVIDERS}:
         raise HTTPException(404, "未知网盘")
-    result = provider_auth_start(settings, provider)
-    store.update_provider(provider, state="authorizing", auth_method=result["mode"])
-    return result
+    session_id = uuid.uuid4().hex
+    try:
+        if provider == "115":
+            public, secret_payload = await start_115_qr()
+            secret_key = f"auth_{session_id}"
+            vault.save_secret(secret_key, serialize_secret(secret_payload))
+            result = store.create_auth_session(
+                session_id=session_id, provider=provider, method="qr", state="waiting",
+                public_payload=public, secret_key=secret_key,
+                expires_at=(datetime.now(UTC) + timedelta(minutes=3)).isoformat(),
+            )
+            store.update_provider(provider, state="authorizing", auth_method="qr")
+            return result
+        result = provider_auth_start(settings, provider)
+        if not result["ready"]:
+            raise HTTPException(409, result["message"])
+        session = store.create_auth_session(
+            session_id=session_id, provider=provider, method=result["mode"], state="waiting",
+            public_payload={"authorize_url": result["url"], "message": result["message"]},
+            expires_at=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        )
+        store.update_provider(provider, state="authorizing", auth_method=result["mode"])
+        return session
+    except ProviderAuthError as error:
+        raise HTTPException(502, str(error)) from error
+
+
+@app.get("/api/providers/auth/{session_id}")
+async def provider_auth_status(session_id: str, _: str = Depends(require_login)):
+    try:
+        session = store.get_auth_session(session_id, include_secret=True)
+    except KeyError as error:
+        raise HTTPException(404, "授权会话不存在") from error
+    if session["state"] in {"succeeded", "expired", "canceled", "failed"}:
+        session.pop("secret_key", None)
+        return session
+    if session["provider"] != "115" or session["method"] != "qr":
+        session.pop("secret_key", None)
+        return session
+    if session.get("expires_at") and datetime.fromisoformat(session["expires_at"]) < datetime.now(UTC):
+        return store.update_auth_session(session_id, state="expired", error="二维码已过期")
+    try:
+        secret = deserialize_secret(vault.load_secret(session["secret_key"]))
+        auth_state, message, credential = await poll_115_qr(secret)
+        public = {**session["public_payload"], "message": message}
+        output = store.update_auth_session(session_id, state=auth_state, public_payload=public)
+        if credential:
+            vault.save("115", credential)
+            vault.delete_secret(session["secret_key"])
+            store.update_provider("115", state="connected", account_mask="115 已授权账号",
+                                  risk_status="normal", auth_method="qr")
+        return output
+    except (ProviderAuthError, httpx.HTTPError) as error:
+        message = str(error).strip() or "115 状态服务暂时没有响应，请刷新二维码重试"
+        raise HTTPException(502, f"查询扫码状态失败：{message}") from error
 
 
 @app.post("/api/providers/{provider}/credential")
@@ -233,20 +351,34 @@ def jobs(limit: int = Query(default=50, ge=1, le=200), _: str = Depends(require_
 
 
 @app.post("/api/intake", status_code=status.HTTP_201_CREATED)
-def intake(payload: IntakeRequest, _: str = Depends(require_login)):
+async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
     try:
         provider = ProviderRegistry.detect(str(payload.share_url))
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     configured = next(item["configured"] for item in provider_states() if item["name"] == provider.name.value)
-    job_status = JobStatus.QUEUED if configured else JobStatus.WAITING_AUTH
-    return store.create(kind="share_intake", provider=provider.name.value, title=payload.title, status=job_status.value, detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder, "auto_organize": payload.auto_organize, "message": "已进入独立网盘处理队列" if configured else f"请先授权 {provider.label}"})
+    if not configured:
+        return store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
+                            status=JobStatus.WAITING_AUTH.value,
+                            detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
+                                    "auto_organize": payload.auto_organize, "message": f"请先授权 {provider.label}"})
+    validation = await validate_share_url(str(payload.share_url))
+    if validation.state != "valid":
+        raise HTTPException(409, f"入库前验证未通过：{validation.reason}")
+    job = store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
+                       status=JobStatus.QUEUED.value,
+                       detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
+                               "auto_organize": payload.auto_organize, "validation": validation.__dict__,
+                               "message": "已通过最终验证，等待同网盘入库"})
+    store.add_operation(action="queue_intake", target_type="job", target_id=str(job["id"]),
+                        summary=f"{payload.title} → {provider.label}:{payload.target_folder}")
+    return job
 
 
 @app.get("/api/tmdb/trending")
 async def tmdb_trending(media_type: str = "all", _: str = Depends(require_login)):
     try:
-        return await trending_tmdb(settings, media_type)
+        return await current_trending(media_type)
     except Exception as error:
         raise HTTPException(502, f"TMDB榜单查询失败：{error}") from error
 
@@ -254,7 +386,9 @@ async def tmdb_trending(media_type: str = "all", _: str = Depends(require_login)
 @app.get("/api/tmdb/search")
 async def tmdb_search(q: str = Query(min_length=1, max_length=100), _: str = Depends(require_login)):
     try:
-        return await search_tmdb(settings, q)
+        config = tmdb_config()
+        return await search_tmdb(settings, q, api_key=config["api_key"],
+                                 language=config["language"], region=config["region"])
     except Exception as error:
         raise HTTPException(502, f"TMDB查询失败：{error}") from error
 
@@ -262,10 +396,46 @@ async def tmdb_search(q: str = Query(min_length=1, max_length=100), _: str = Dep
 @app.get("/api/search")
 async def resource_search(q: str = Query(min_length=1, max_length=100), _: str = Depends(require_login)):
     try:
-        resources, works = await asyncio.gather(search_resources(settings, q), search_tmdb(settings, q))
-        return {"works": works, "resources": resources}
+        config = tmdb_config()
+        discovered, works = await asyncio.gather(
+            search_resources(settings, q),
+            search_tmdb(settings, q, api_key=config["api_key"], language=config["language"],
+                        region=config["region"]),
+        )
+        semaphore = asyncio.Semaphore(4)
+
+        async def check(item: dict) -> tuple[dict, str]:
+            record = store.upsert_resource(item)
+            if item["recognition_state"] != "recognized":
+                return item, "pending_recognition"
+            async with semaphore:
+                validation = await validate_share_url(item["url"])
+            store.update_resource_validation(
+                record["fingerprint"], state=validation.state, reason=validation.reason,
+                checked_at=validation.checked_at, recheck_after=validation.recheck_after,
+            )
+            item["validation_state"] = validation.state
+            item["validation_reason"] = validation.reason
+            return item, validation.state
+
+        checked = await asyncio.gather(*(check(item) for item in discovered[:40]))
+        visible = [item for item, state in checked if state == "valid"]
+        counts: dict[str, int] = {"discovered": len(discovered), "valid": 0, "invalid": 0,
+                                  "unverifiable": 0, "pending_recognition": 0}
+        for _, validation_state in checked:
+            counts[validation_state] = counts.get(validation_state, 0) + 1
+        return {"works": works, "resources": visible, "progress": counts}
     except Exception as error:
         raise HTTPException(502, f"资源搜索失败：{error}") from error
+
+
+@app.post("/api/resources/validate")
+async def validate_resource(payload: ResourceValidationRequest, _: str = Depends(require_login)):
+    try:
+        result = await validate_share_url(str(payload.share_url))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return result.__dict__
 
 
 @app.get("/api/subscriptions")
@@ -314,13 +484,90 @@ def create_strm(payload: StrmRequest, _: str = Depends(require_login)):
 
 @app.get("/api/settings")
 def get_app_settings(_: str = Depends(require_login)):
-    return store.load_settings()
+    values = store.load_settings()
+    tmdb = tmdb_config()
+    values.update({"tmdb_configured": bool(tmdb["api_key"]), "tmdb_language": tmdb["language"],
+                   "tmdb_region": tmdb["region"], "tmdb_ranking_window": tmdb["window"],
+                   "openlist_configured": openlist_configured()})
+    return values
 
 
 @app.put("/api/settings")
 def update_app_settings(payload: SettingsRequest, _: str = Depends(require_login)):
     store.save_settings(payload.model_dump())
     return {"saved": True, "settings": store.load_settings()}
+
+
+@app.get("/api/settings/tmdb")
+def get_tmdb_settings(_: str = Depends(require_login)):
+    config = tmdb_config()
+    return {"configured": bool(config["api_key"]), "api_key_mask": "••••••••" if config["api_key"] else "",
+            "language": config["language"], "region": config["region"],
+            "ranking_window": config["window"]}
+
+
+@app.put("/api/settings/tmdb")
+async def update_tmdb_settings(payload: TmdbSettingsRequest, _: str = Depends(require_login)):
+    if payload.api_key:
+        try:
+            await trending_tmdb(settings, "movie", api_key=payload.api_key, language=payload.language,
+                                region=payload.region, window=payload.ranking_window)
+        except httpx.HTTPError as error:
+            raise HTTPException(400, "TMDB 密钥测试失败，请检查密钥和网络") from error
+        vault.save_secret("tmdb_api_key", payload.api_key)
+    elif not vault.load_secret("tmdb_api_key") and not settings.tmdb_api_key:
+        raise HTTPException(400, "请输入 TMDB API 密钥")
+    store.save_settings({"tmdb_language": payload.language, "tmdb_region": payload.region,
+                         "tmdb_ranking_window": payload.ranking_window})
+    return {"saved": True, "test": "connected", "settings": get_tmdb_settings(_)}
+
+
+@app.post("/api/settings/tmdb/test")
+async def test_tmdb(_: str = Depends(require_login)):
+    try:
+        ranking = await current_trending("movie")
+    except httpx.HTTPError as error:
+        raise HTTPException(502, "TMDB 连接测试失败") from error
+    if not ranking["live"]:
+        raise HTTPException(409, "尚未配置 TMDB API 密钥")
+    return {"connected": True, "updated_at": ranking["updated_at"], "items": len(ranking["items"])}
+
+
+@app.put("/api/settings/openlist")
+async def update_openlist(payload: OpenListSettingsRequest, _: str = Depends(require_login)):
+    password = payload.password or vault.load_secret("openlist_password")
+    client = OpenListClient(payload.url, payload.username, password)
+    try:
+        result = await client.test()
+    except (ProviderAuthError, httpx.HTTPError) as error:
+        raise HTTPException(400, f"OpenList 连接失败：{error}") from error
+    if payload.password:
+        vault.save_secret("openlist_password", payload.password)
+    store.save_settings({"openlist_url": payload.url.rstrip("/"), "openlist_username": payload.username})
+    return result
+
+
+@app.post("/api/providers/{provider}/directories")
+async def provider_directories(provider: str, payload: DirectoryRequest, _: str = Depends(require_login)):
+    if provider not in {item.name.value for item in PROVIDERS}:
+        raise HTTPException(404, "未知网盘")
+    account = next(item for item in provider_states() if item["name"] == provider)
+    if not account["configured"]:
+        raise HTTPException(409, f"请先授权 {account['label']}")
+    if not openlist_configured():
+        raise HTTPException(409, "请先在设置中连接本机 OpenList，才能逐级读取真实目录")
+    mount_root = f"/{account['label']}"
+    requested = payload.path or mount_root
+    if requested == "/":
+        requested = mount_root
+    if requested != mount_root and not requested.startswith(mount_root + "/"):
+        raise HTTPException(400, "目标目录必须位于当前网盘挂载点内")
+    try:
+        directories = await openlist_client().list_directories(requested)
+    except (ProviderAuthError, httpx.HTTPError) as error:
+        raise HTTPException(502, f"读取目录失败：{error}") from error
+    return {"provider": provider, "root": mount_root, "path": requested,
+            "directories": directories}
 
 
 @app.post("/api/notify")

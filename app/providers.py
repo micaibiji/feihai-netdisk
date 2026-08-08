@@ -13,6 +13,7 @@ class Provider:
     label: str
     domains: tuple[str, ...]
     credential_env: str
+    auth_methods: tuple[str, ...]
 
     def matches(self, url: str) -> bool:
         host = (urlparse(url).hostname or "").lower()
@@ -29,24 +30,28 @@ PROVIDERS = (
         "115网盘",
         ("115.com", "115cdn.com"),
         "115_ACCESS_TOKEN",
+        ("qr",),
     ),
     Provider(
         ProviderName.BAIDU,
         "百度网盘",
         ("pan.baidu.com",),
         "BAIDU_ACCESS_TOKEN",
+        ("oauth",),
     ),
     Provider(
         ProviderName.QUARK,
         "夸克网盘",
         ("pan.quark.cn", "drive.quark.cn"),
         "QUARK_COOKIE",
+        ("gateway_qr",),
     ),
     Provider(
         ProviderName.CHINA_MOBILE,
         "中国移动云盘",
         ("yun.139.com", "caiyun.139.com"),
         "CHINA_MOBILE_TOKEN",
+        ("gateway_password",),
     ),
 )
 
@@ -66,6 +71,7 @@ class ProviderRegistry:
                 "name": provider.name.value,
                 "label": provider.label,
                 "configured": provider.configured,
+                "auth_methods": list(provider.auth_methods),
             }
             for provider in PROVIDERS
         ]
@@ -76,3 +82,10 @@ class ProviderRegistry:
             if provider.name.value == name:
                 return provider.label
         return name
+
+    @staticmethod
+    def get(name: str) -> Provider:
+        for provider in PROVIDERS:
+            if provider.name.value == name:
+                return provider
+        raise ValueError("未知网盘")

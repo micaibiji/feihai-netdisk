@@ -62,8 +62,42 @@ class JobStore:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS provider_auth_sessions (
+                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, method TEXT NOT NULL,
+                    state TEXT NOT NULL, public_payload TEXT NOT NULL DEFAULT '{}',
+                    secret_key TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS resources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL, share_url TEXT NOT NULL, extraction_code TEXT NOT NULL DEFAULT '',
+                    raw_title TEXT NOT NULL DEFAULT '', normalized_title TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '', media_type TEXT NOT NULL DEFAULT '',
+                    season INTEGER, episode INTEGER, quality TEXT NOT NULL DEFAULT '',
+                    recognition_state TEXT NOT NULL DEFAULT 'pending', tmdb_id INTEGER,
+                    validation_state TEXT NOT NULL DEFAULT 'pending', validation_reason TEXT NOT NULL DEFAULT '',
+                    checked_at TEXT, recheck_after TEXT, discovered_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_resources_visible
+                    ON resources(validation_state, recognition_state, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS operation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
+                    target_type TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL, reversible INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
+            job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            job_additions = {
+                "progress": "INTEGER NOT NULL DEFAULT 0",
+                "stage": "TEXT NOT NULL DEFAULT ''",
+                "error_code": "TEXT NOT NULL DEFAULT ''",
+                "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, definition in job_additions.items():
+                if name not in job_columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(subscriptions)")}
             additions = {
                 "media_type": "TEXT NOT NULL DEFAULT 'tv'",
@@ -109,6 +143,25 @@ class JobStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
         return [self._serialize_job(row) for row in rows]
+
+    def update_job(self, job_id: int, *, status: str | None = None, progress: int | None = None,
+                   stage: str | None = None, detail: dict[str, Any] | None = None,
+                   error_code: str | None = None) -> dict[str, Any]:
+        values: dict[str, Any] = {"updated_at": utc_now()}
+        if status is not None:
+            values["status"] = status
+        if progress is not None:
+            values["progress"] = max(0, min(100, progress))
+        if stage is not None:
+            values["stage"] = stage
+        if detail is not None:
+            values["detail"] = json.dumps(detail, ensure_ascii=False)
+        if error_code is not None:
+            values["error_code"] = error_code
+        assignments = ",".join(f"{key}=?" for key in values)
+        with self._connect() as connection:
+            connection.execute(f"UPDATE jobs SET {assignments} WHERE id=?", (*values.values(), job_id))
+        return self.get(job_id)
 
     def create_subscription(self, keyword: str, auto_intake: bool = True, media_type: str = "tv", year: int | None = None) -> dict[str, Any]:
         keyword = keyword.strip()
@@ -230,6 +283,104 @@ class JobStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT key,value FROM app_settings").fetchall()
         return {row["key"]: json.loads(row["value"]) for row in rows}
+
+    def create_auth_session(self, *, session_id: str, provider: str, method: str, state: str,
+                            public_payload: dict[str, Any], secret_key: str = "",
+                            expires_at: str | None = None) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO provider_auth_sessions(
+                   id,provider,method,state,public_payload,secret_key,expires_at,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (session_id, provider, method, state, json.dumps(public_payload, ensure_ascii=False),
+                 secret_key, expires_at, now, now),
+            )
+        return self.get_auth_session(session_id, include_secret=False)
+
+    def get_auth_session(self, session_id: str, *, include_secret: bool = False) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM provider_auth_sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None:
+            raise KeyError(session_id)
+        item = dict(row)
+        item["public_payload"] = json.loads(item["public_payload"])
+        if not include_secret:
+            item.pop("secret_key", None)
+        return item
+
+    def update_auth_session(self, session_id: str, *, state: str, public_payload: dict[str, Any] | None = None,
+                            error: str = "") -> dict[str, Any]:
+        values: dict[str, Any] = {"state": state, "error": error[:500], "updated_at": utc_now()}
+        if public_payload is not None:
+            values["public_payload"] = json.dumps(public_payload, ensure_ascii=False)
+        assignments = ",".join(f"{key}=?" for key in values)
+        with self._connect() as connection:
+            connection.execute(f"UPDATE provider_auth_sessions SET {assignments} WHERE id=?", (*values.values(), session_id))
+        return self.get_auth_session(session_id, include_secret=False)
+
+    def upsert_resource(self, resource: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO resources(
+                   fingerprint,provider,share_url,extraction_code,raw_title,normalized_title,source,
+                   media_type,season,episode,quality,recognition_state,tmdb_id,validation_state,
+                   validation_reason,checked_at,recheck_after,discovered_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(fingerprint) DO UPDATE SET
+                   raw_title=excluded.raw_title,source=excluded.source,season=excluded.season,
+                   episode=excluded.episode,quality=excluded.quality,updated_at=excluded.updated_at""",
+                (resource["fingerprint"], resource["provider"], resource["url"], resource.get("extraction_code", ""),
+                 resource.get("title", ""), resource.get("normalized_title", ""), resource.get("source", ""),
+                 resource.get("media_type", ""), resource.get("season"), resource.get("episode"),
+                 resource.get("quality", ""), resource.get("recognition_state", "pending"), resource.get("tmdb_id"),
+                 resource.get("validation_state", "pending"), resource.get("validation_reason", ""),
+                 resource.get("checked_at"), resource.get("recheck_after"), resource.get("datetime") or now, now),
+            )
+            row = connection.execute("SELECT * FROM resources WHERE fingerprint=?", (resource["fingerprint"],)).fetchone()
+        return dict(row)
+
+    def update_resource_validation(self, fingerprint: str, *, state: str, reason: str,
+                                   checked_at: str, recheck_after: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE resources SET validation_state=?,validation_reason=?,checked_at=?,
+                   recheck_after=?,updated_at=? WHERE fingerprint=?""",
+                (state, reason[:500], checked_at, recheck_after, utc_now(), fingerprint),
+            )
+            row = connection.execute("SELECT * FROM resources WHERE fingerprint=?", (fingerprint,)).fetchone()
+        if row is None:
+            raise KeyError(fingerprint)
+        return dict(row)
+
+    def list_resources(self, *, visible_only: bool = True, query: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if visible_only:
+            where.extend(("validation_state='valid'", "recognition_state='recognized'"))
+        if query:
+            where.append("(normalized_title LIKE ? OR raw_title LIKE ?)")
+            term = f"%{query}%"
+            params.extend((term, term))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, min(limit, 500)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM resources {clause} ORDER BY updated_at DESC LIMIT ?", params
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_operation(self, *, action: str, target_type: str, target_id: str,
+                      summary: str, reversible: bool = False) -> dict[str, Any]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO operation_history(action,target_type,target_id,summary,reversible,created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (action, target_type, target_id, summary, int(reversible), utc_now()),
+            )
+            row = connection.execute("SELECT * FROM operation_history WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return dict(row)
 
     @staticmethod
     def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:

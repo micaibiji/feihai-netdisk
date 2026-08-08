@@ -14,8 +14,27 @@ class ProviderName(StrEnum):
 
 class JobStatus(StrEnum):
     QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    CANCELED = "canceled"
     WAITING_AUTH = "waiting_auth"
     COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ValidationState(StrEnum):
+    PENDING = "pending"
+    VALID = "valid"
+    INVALID = "invalid"
+    UNVERIFIABLE = "unverifiable"
+
+
+class AuthSessionState(StrEnum):
+    WAITING = "waiting"
+    SCANNED = "scanned"
+    SUCCEEDED = "succeeded"
+    EXPIRED = "expired"
+    CANCELED = "canceled"
     FAILED = "failed"
 
 
@@ -59,6 +78,28 @@ class SettingsRequest(BaseModel):
     auto_organize: bool = True
     fnos_library_path: str = Field(default="/app/strm", max_length=500)
     naming_language: str = Field(default="zh-CN", max_length=20)
+
+
+class TmdbSettingsRequest(BaseModel):
+    api_key: str = Field(default="", max_length=500)
+    language: str = Field(default="zh-CN", pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
+    region: str = Field(default="CN", pattern=r"^[A-Z]{2}$")
+    ranking_window: str = Field(default="day", pattern="^(day|week)$")
+
+
+class ResourceValidationRequest(BaseModel):
+    share_url: HttpUrl
+    force: bool = False
+
+
+class DirectoryRequest(BaseModel):
+    path: str = Field(default="/", max_length=1000)
+
+
+class OpenListSettingsRequest(BaseModel):
+    url: str = Field(default="", max_length=500)
+    username: str = Field(default="admin", max_length=100)
+    password: str = Field(default="", max_length=500)
 
 
 class ProviderCredentialRequest(BaseModel):

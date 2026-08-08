@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 
 from fastapi.testclient import TestClient
 
@@ -6,9 +7,11 @@ from app.config import Settings
 from app.main import (SESSION_COOKIE, SESSION_MAX_AGE, app, create_session_token, settings,
                       validate_session_token)
 from app.models import ProviderName
+from app.provider_auth import parse_115_qr_state
 from app.providers import ProviderRegistry
 from app.services import (_find_urls, create_media_bundle, generate_strm,
-                          media_folder, media_relative_path, parse_episode, safe_name)
+                          media_folder, media_relative_path, parse_episode, safe_name,
+                          trending_tmdb)
 from app.storage import JobStore
 from app.vault import CredentialVault
 
@@ -126,3 +129,56 @@ def test_browser_login_page_replaces_basic_auth_prompt():
         verified = client.post("/api/verify-password", json={"password": settings.admin_password})
         assert verified.status_code == 200
         assert verified.json() == {"verified": True}
+
+
+def test_tmdb_without_key_returns_no_fake_ranking(tmp_path: Path):
+    local_settings = Settings(
+        app_name="飞海网盘", admin_username="admin", admin_password="secret",
+        data_dir=tmp_path / "data", strm_dir=tmp_path / "strm", tmdb_api_key="",
+        telegram_bot_token="", telegram_chat_id="", wecom_webhook_url="",
+        pansou_base_url="http://pansou:8888", provider_priority=("115", "baidu", "quark", "china_mobile"),
+        subscription_interval_seconds=1800,
+    )
+    result = asyncio.run(trending_tmdb(local_settings))
+    assert result["live"] is False
+    assert result["items"] == []
+    assert "配置" in result["message"]
+
+
+def test_resource_visibility_requires_recognition_and_validation(tmp_path: Path):
+    local_store = JobStore(tmp_path / "feihai.db")
+    local_store.initialize()
+    record = local_store.upsert_resource({
+        "fingerprint": "abc", "provider": "115", "url": "https://115.com/s/abc",
+        "title": "庆余年 S02E36", "normalized_title": "庆余年", "source": "test",
+        "season": 2, "episode": 36, "quality": "4K", "recognition_state": "recognized",
+    })
+    assert local_store.list_resources() == []
+    local_store.update_resource_validation(
+        record["fingerprint"], state="valid", reason="分享页面可以正常访问",
+        checked_at="2026-08-08T00:00:00+00:00", recheck_after="2026-08-08T02:00:00+00:00",
+    )
+    assert local_store.list_resources()[0]["normalized_title"] == "庆余年"
+
+
+def test_auth_session_does_not_expose_secret_key(tmp_path: Path):
+    local_store = JobStore(tmp_path / "feihai.db")
+    local_store.initialize()
+    session = local_store.create_auth_session(
+        session_id="session1", provider="115", method="qr", state="waiting",
+        public_payload={"qr_image_url": "https://example.com/qr"}, secret_key="private-key",
+    )
+    assert "secret_key" not in session
+    assert local_store.get_auth_session("session1", include_secret=True)["secret_key"] == "private-key"
+
+
+def test_generic_secrets_are_encrypted_at_rest(tmp_path: Path):
+    local_vault = CredentialVault(tmp_path)
+    local_vault.save_secret("tmdb_api_key", "top-secret")
+    assert local_vault.load_secret("tmdb_api_key") == "top-secret"
+    assert b"top-secret" not in (tmp_path / "credentials" / "tmdb_api_key.token").read_bytes()
+
+
+def test_115_empty_long_poll_payload_is_still_waiting():
+    assert parse_115_qr_state({"state": 1, "code": 0, "data": {}}) == ("waiting", "等待扫码")
+    assert parse_115_qr_state({"data": {"status": "1"}})[0] == "scanned"

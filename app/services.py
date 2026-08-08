@@ -102,30 +102,31 @@ def _tmdb_item(item: dict[str, Any], rank: int | None = None) -> dict[str, Any]:
     }
 
 
-async def search_tmdb(settings: Settings, query: str) -> list[dict[str, Any]]:
-    if not settings.tmdb_api_key:
+async def search_tmdb(settings: Settings, query: str, *, api_key: str | None = None,
+                      language: str = "zh-CN", region: str = "CN") -> list[dict[str, Any]]:
+    effective_key = settings.tmdb_api_key if api_key is None else api_key
+    if not effective_key:
         return []
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get("https://api.themoviedb.org/3/search/multi", params={"api_key": settings.tmdb_api_key, "query": query, "language": "zh-CN", "include_adult": "false"})
+        response = await client.get("https://api.themoviedb.org/3/search/multi", params={"api_key": effective_key, "query": query, "language": language, "region": region, "include_adult": "false"})
         response.raise_for_status()
         results = response.json().get("results", [])[:20]
     return [_tmdb_item(item) for item in results if item.get("media_type") in {"movie", "tv"}]
 
 
-async def trending_tmdb(settings: Settings, media_type: str = "all") -> dict[str, Any]:
-    if not settings.tmdb_api_key:
-        return {"live": False, "items": fallback_trending()}
+async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key: str | None = None,
+                        language: str = "zh-CN", region: str = "CN",
+                        window: str = "day") -> dict[str, Any]:
+    effective_key = settings.tmdb_api_key if api_key is None else api_key
+    if not effective_key:
+        return {"live": False, "items": [], "updated_at": None, "message": "请在设置中配置 TMDB API 密钥"}
     endpoint_type = media_type if media_type in {"movie", "tv"} else "all"
+    endpoint_window = window if window in {"day", "week"} else "day"
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(f"https://api.themoviedb.org/3/trending/{endpoint_type}/day", params={"api_key": settings.tmdb_api_key, "language": "zh-CN"})
+        response = await client.get(f"https://api.themoviedb.org/3/trending/{endpoint_type}/{endpoint_window}", params={"api_key": effective_key, "language": language, "region": region})
         response.raise_for_status()
         items = response.json().get("results", [])
-    return {"live": True, "items": [_tmdb_item(item, index + 1) for index, item in enumerate(items[:18]) if item.get("media_type", endpoint_type) in {"movie", "tv"}]}
-
-
-def fallback_trending() -> list[dict[str, Any]]:
-    titles = [("庆余年 第二季", "2024", "tv", 8.1), ("凡人修仙传", "2025", "tv", 7.6), ("哪吒之魔童闹海", "2025", "movie", 8.5), ("藏海传", "2025", "tv", 7.2), ("长安的荔枝", "2025", "movie", 7.7), ("唐探1900", "2025", "movie", 6.4)]
-    return [{"id": None, "title": title, "year": year, "date": year, "media_type": kind, "score": score, "overview": "配置 TMDB 密钥后，这里会自动展示当日实时影视榜单。", "poster": "", "backdrop": "", "rank": index + 1} for index, (title, year, kind, score) in enumerate(titles)]
+    return {"live": True, "items": [_tmdb_item(item, index + 1) for index, item in enumerate(items[:18]) if item.get("media_type", endpoint_type) in {"movie", "tv"}], "updated_at": datetime.now(UTC).isoformat(), "message": "TMDB 实时榜单"}
 
 
 async def send_notifications(settings: Settings, message: str) -> list[str]:
@@ -180,12 +181,17 @@ async def search_resources(settings: Settings, query: str) -> list[dict[str, Any
         except ValueError:
             continue
         season, episode = parse_episode(title)
+        generic_title = title.strip().lower() in {"", "success", "ok", "true", "result"}
+        recognized = not generic_title and query.strip().lower() in title.lower()
         fingerprint = hashlib.sha256(clean_url.encode()).hexdigest()
         dedup[fingerprint] = {
             "provider": provider.name.value, "provider_label": provider.label, "title": title,
             "url": clean_url, "source": source, "fingerprint": fingerprint,
             "season": season, "episode": episode, "quality": quality_label(title),
             "risk_status": "unknown", "datetime": datetime.now(UTC).isoformat(),
+            "normalized_title": query.strip() if recognized else "",
+            "recognition_state": "recognized" if recognized else "pending",
+            "validation_state": "pending",
         }
     order = {name: index for index, name in enumerate(settings.provider_priority)}
     return sorted(dedup.values(), key=lambda item: (-item["season"], -item["episode"], order.get(item["provider"], 999)))[:100]
