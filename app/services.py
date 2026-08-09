@@ -22,6 +22,18 @@ URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
 TMDB_SOURCE_PAGE_SIZE = 20
 TMDB_MAX_SOURCE_PAGE = 500
 RANKING_PAGE_SIZE = 24
+TMDB_GENRES = {
+    "action": {"movie": 28, "tv": 10759},
+    "animation": {"movie": 16, "tv": 16},
+    "comedy": {"movie": 35, "tv": 35},
+    "crime": {"movie": 80, "tv": 80},
+    "documentary": {"movie": 99, "tv": 99},
+    "drama": {"movie": 18, "tv": 18},
+    "family": {"movie": 10751, "tv": 10751},
+    "mystery": {"movie": 9648, "tv": 9648},
+    "romance": {"movie": 10749},
+    "scifi": {"movie": 878, "tv": 10765},
+}
 EPISODE_PATTERNS = (
     re.compile(r"S(?P<season>\d{1,2})\s*E(?P<episode>\d{1,4})", re.I),
     re.compile(r"第\s*(?P<episode>\d{1,4})\s*[集话期]"),
@@ -127,7 +139,8 @@ def _ranking_sort_key(item: dict[str, Any]) -> tuple[str, float]:
 
 async def _discover_tmdb_media(client: httpx.AsyncClient, media_type: str, *, api_key: str,
                                language: str, region: str, page: int,
-                               page_size: int) -> dict[str, Any]:
+                               page_size: int, year: int | None = None,
+                               genre: str | None = None, country: str | None = None) -> dict[str, Any]:
     """Return a stable logical page while TMDB itself uses fixed 20-item pages."""
     start = (page - 1) * page_size
     first_source_page = start // TMDB_SOURCE_PAGE_SIZE + 1
@@ -146,8 +159,21 @@ async def _discover_tmdb_media(client: httpx.AsyncClient, media_type: str, *, ap
         f"{date_field}.lte": datetime.now(UTC).date().isoformat(),
         "vote_count.gte": 10,
     }
+    if year:
+        params["primary_release_year" if media_type == "movie" else "first_air_date_year"] = year
+        params[f"{date_field}.gte"] = f"{year}-01-01"
+        params[f"{date_field}.lte"] = min(
+            str(params[f"{date_field}.lte"]), f"{year}-12-31"
+        )
+    if genre:
+        genre_id = TMDB_GENRES.get(genre, {}).get(media_type)
+        if not genre_id:
+            return {"items": [], "total_results": 0, "total_pages": 0}
+        params["with_genres"] = genre_id
+    if country:
+        params["with_origin_country"] = country
     if media_type == "movie":
-        params.update({"region": region, "include_video": "false"})
+        params.update({"include_video": "false"})
 
     async def fetch(source_page: int) -> dict[str, Any]:
         response = await client.get(
@@ -174,7 +200,8 @@ async def _discover_tmdb_media(client: httpx.AsyncClient, media_type: str, *, ap
 
 async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key: str | None = None,
                         language: str = "zh-CN", region: str = "CN",
-                        page: int = 1) -> dict[str, Any]:
+                        page: int = 1, year: int | None = None,
+                        genre: str | None = None, country: str | None = None) -> dict[str, Any]:
     effective_key = settings.tmdb_api_key if api_key is None else api_key
     page = max(1, int(page))
     if not effective_key:
@@ -186,9 +213,11 @@ async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key:
         if endpoint_type == "all":
             movie_page, tv_page = await asyncio.gather(
                 _discover_tmdb_media(client, "movie", api_key=effective_key,
-                                     language=language, region=region, page=page, page_size=12),
+                                     language=language, region=region, page=page, page_size=12,
+                                     year=year, genre=genre, country=country),
                 _discover_tmdb_media(client, "tv", api_key=effective_key,
-                                     language=language, region=region, page=page, page_size=12),
+                                     language=language, region=region, page=page, page_size=12,
+                                     year=year, genre=genre, country=country),
             )
             raw_items = movie_page["items"] + tv_page["items"]
             raw_items.sort(key=_ranking_sort_key, reverse=True)
@@ -198,6 +227,7 @@ async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key:
             result = await _discover_tmdb_media(
                 client, endpoint_type, api_key=effective_key, language=language,
                 region=region, page=page, page_size=RANKING_PAGE_SIZE,
+                year=year, genre=genre, country=country,
             )
             raw_items = result["items"]
             total_results = result["total_results"]
@@ -213,6 +243,7 @@ async def trending_tmdb(settings: Settings, media_type: str = "all", *, api_key:
         "total_pages": total_pages,
         "total_results": total_results,
         "sort": "date_desc,popularity_desc",
+        "filters": {"year": year, "genre": genre or "", "country": country or ""},
     }
 
 

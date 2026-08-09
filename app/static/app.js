@@ -9,6 +9,7 @@ const state = {
   rankingType: "all",
   rankingPage: 1,
   rankingLoading: false,
+  rankingFilters: { year: "", genre: "", country: "" },
 };
 const pm = {
   115: { label: "115网盘", short: "115", color: "#2f66ff" },
@@ -16,6 +17,7 @@ const pm = {
   quark: { label: "夸克网盘", short: "夸", color: "#1c2530" },
   china_mobile: { label: "中国移动云盘", short: "移", color: "#17a4df" },
 };
+const resourceWorkCache = new Map(), resourceWorkRequests = new Map();
 const titles = {
   search: ["全网资源搜索", "同时搜索影视作品、Telegram 频道与四个网盘来源。"],
   following: ["我的追更", "一个影视可保留多个网盘来源，自动使用最新可用来源。"],
@@ -133,6 +135,24 @@ function rankingPagination(r) {
   for (let value = first; value <= last; value++) pages.push(value);
   return `<nav class="ranking-pagination" aria-label="影视排行翻页"><span>每页 24 部 · 第 ${page} / ${total} 页</span><div><button data-ranking-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>← 上一页</button>${pages.map((value) => `<button data-ranking-page="${value}" class="${value === page ? "active" : ""}">${value}</button>`).join("")}<button data-ranking-page="${page + 1}" ${page >= total ? "disabled" : ""}>下一页 →</button></div></nav>`;
 }
+function rankingFilters() {
+  const selected = (name, value) =>
+      state.rankingFilters[name] === String(value) ? "selected" : "",
+    currentYear = new Date().getFullYear(),
+    years = Array.from({ length: currentYear - 1949 }, (_, index) => currentYear - index),
+    genres = [
+      ["action", "动作冒险"], ["animation", "动画"], ["comedy", "喜剧"],
+      ["crime", "犯罪"], ["documentary", "纪录片"], ["drama", "剧情"],
+      ["family", "家庭"], ["mystery", "悬疑"], ["romance", "爱情"],
+      ["scifi", "科幻奇幻"],
+    ],
+    countries = [
+      ["CN", "中国大陆"], ["HK", "中国香港"], ["TW", "中国台湾"],
+      ["US", "美国"], ["GB", "英国"], ["JP", "日本"], ["KR", "韩国"],
+      ["IN", "印度"], ["FR", "法国"], ["DE", "德国"],
+    ];
+  return `<form id="rankingFilters" class="ranking-filters"><label><span>年份</span><select name="year"><option value="">全部年份</option>${years.map((year) => `<option value="${year}" ${selected("year", year)}>${year}年</option>`).join("")}</select></label><label><span>类型</span><select name="genre"><option value="">全部类型</option>${genres.map(([value, label]) => `<option value="${value}" ${selected("genre", value)}>${label}</option>`).join("")}</select></label><label><span>国家/地区</span><select name="country"><option value="">全部国家/地区</option>${countries.map(([value, label]) => `<option value="${value}" ${selected("country", value)}>${label}</option>`).join("")}</select></label><button type="button" id="resetRankingFilters" ${Object.values(state.rankingFilters).some(Boolean) ? "" : "disabled"}>清除筛选</button></form>`;
+}
 function home() {
   const r = state.overview.ranking,
     x = r.items || [],
@@ -149,7 +169,7 @@ function home() {
     )
     .join(
       "",
-    )}</div></header>${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>等待真实榜单</h2><p>配置并测试 TMDB 后自动显示，不使用演示海报。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>检测网站明确判定失效的来源自动隐藏，其余来源保留并显示检测状态。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>有效性检测</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
+    )}</div></header>${rankingFilters()}${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>没有符合筛选的内容</h2><p>可以清除年份、类型或国家/地区后重试；未配置 TMDB 时请先前往设置。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>检测网站明确判定失效的来源自动隐藏，其余来源保留并显示检测状态。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>有效性检测</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
   bind();
 }
 
@@ -157,9 +177,11 @@ async function loadRanking(type, page) {
   if (state.rankingLoading) return;
   state.rankingLoading = true;
   try {
-    const ranking = await api(
-      `/api/tmdb/trending?media_type=${encodeURIComponent(type)}&page=${page}`,
-    );
+    const params = new URLSearchParams({ media_type: type, page: String(page) });
+    Object.entries(state.rankingFilters).forEach(([key, value]) => {
+      if (value) params.set(key, value);
+    });
+    const ranking = await api(`/api/tmdb/trending?${params}`);
     state.overview.ranking = ranking;
     state.rankingType = type;
     state.rankingPage = ranking.page || page;
@@ -203,6 +225,7 @@ function results() {
 }
 function resource(x) {
   const m = pm[x.provider],
+    work = matchedWork(x),
     episode =
       x.episode > 0
         ? `S${String(x.season || 1).padStart(2, "0")}E${String(x.episode).padStart(2, "0")}`
@@ -212,8 +235,113 @@ function resource(x) {
         ? { cls: "valid", label: "✓ 检测有效", hint: x.provider === "115" ? "优先来源" : "可用来源" }
         : x.validation_state === "detector_unavailable"
           ? { cls: "pending", label: "! 检测服务异常", hint: "未判定失效" }
-          : { cls: "pending", label: "↻ 暂不可验证", hint: "未判定失效" };
-  return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.normalized_title || x.title)}</h3><p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status ${validation.cls}"><span>${validation.label}</span><small>${validation.hint}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
+          : { cls: "pending", label: "↻ 暂不可验证", hint: "未判定失效" },
+    posterImage = work?.poster
+      ? `<img src="${esc(work.poster)}" alt="${esc(work.title)}" loading="lazy">`
+      : `<span class="resource-poster-placeholder" style="background:${m.color}">${m.short}</span>`;
+  return `<article class="resource-row"><button class="resource-poster" data-resource-detail="${esc(x.fingerprint)}" aria-label="查看${esc(work?.title || x.normalized_title || x.title)}简介">${posterImage}<em>查看简介</em></button><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><button class="resource-title" data-resource-detail="${esc(x.fingerprint)}">${esc(work?.title || x.normalized_title || x.title)}</button>${work ? `<small class="resource-meta">${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}</small>` : '<small class="resource-meta">暂未匹配到 TMDB 影视信息</small>'}<p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status ${validation.cls}"><span>${validation.label}</span><small>${validation.hint}</small></div><div class="row-actions"><button data-resource-detail="${esc(x.fingerprint)}">查看简介</button><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
+}
+
+function normalizedMediaTitle(value = "") {
+  return String(value).normalize("NFKC").toLowerCase().replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+}
+
+function matchedWork(resource) {
+  if (resourceWorkCache.has(resource.fingerprint))
+    return resourceWorkCache.get(resource.fingerprint);
+  const works = state.search?.works || [],
+    expected = normalizedMediaTitle(resource.normalized_title || resource.title);
+  if (!expected) return null;
+  const direct = works.find((work) => {
+      const title = normalizedMediaTitle(work.title);
+      return title && (title.includes(expected) || expected.includes(title));
+    });
+  if (direct) resourceWorkCache.set(resource.fingerprint, direct);
+  return direct || null;
+}
+
+function resourceLookupTitle(resource) {
+  if (resource.recognition_state === "recognized" && resource.normalized_title)
+    return resource.normalized_title;
+  let value = String(resource.title || "").replace(/^【[^】]+】\s*/, "").trim();
+  const named = value.match(/名称[：:]\s*([^。\.]+?)(?:[。\.]描述[：:]|$)/);
+  if (named?.[1]) value = named[1].trim();
+  value = value.replace(/^【[^】]+】\s*/, "")
+    .split(/(?:[。\.]?描述[：:]|[。\.]?链接[：:])/)[0]
+    .replace(/\s+(?:全\s*\d+\s*集|更新至?\s*\d+\s*集|S\d{1,2}E\d+|第\d+季|(?:19|20)\d{2}|4K|2160P|1080P|国语|中字).*$/i, "")
+    .trim();
+  return (value || resource.normalized_title || state.query).slice(0, 100);
+}
+
+async function loadResourceWork(resource) {
+  const local = matchedWork(resource);
+  if (local) return local;
+  if (resourceWorkRequests.has(resource.fingerprint))
+    return resourceWorkRequests.get(resource.fingerprint);
+  const request = api(`/api/tmdb/search?q=${encodeURIComponent(resourceLookupTitle(resource))}`)
+    .then((works) => {
+      const expected = normalizedMediaTitle(resourceLookupTitle(resource));
+      const work =
+        works.find((item) => {
+          const title = normalizedMediaTitle(item.title);
+          return title && (title.includes(expected) || expected.includes(title));
+        }) || works[0] || null;
+      resourceWorkCache.set(resource.fingerprint, work);
+      return work;
+    })
+    .catch(() => null)
+    .finally(() => resourceWorkRequests.delete(resource.fingerprint));
+  resourceWorkRequests.set(resource.fingerprint, request);
+  return request;
+}
+
+function hydrateResourcePosters() {
+  const observer = new IntersectionObserver((entries) => {
+    entries.filter((entry) => entry.isIntersecting).forEach(async (entry) => {
+      observer.unobserve(entry.target);
+      const resource = (state.search?.resources || []).find(
+        (item) => item.fingerprint === entry.target.dataset.resourceDetail,
+      );
+      if (!resource || matchedWork(resource)) return;
+      const work = await loadResourceWork(resource);
+      if (!work || !entry.target.isConnected) return;
+      if (work.poster)
+        entry.target.innerHTML = `<img src="${esc(work.poster)}" alt="${esc(work.title)}" loading="lazy"><em>查看简介</em>`;
+      const row = entry.target.closest(".resource-row");
+      const meta = row?.querySelector(".resource-meta");
+      if (meta)
+        meta.textContent = `${work.year || "待定"} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}`;
+    });
+  }, { rootMargin: "240px 0px" });
+  document.querySelectorAll(".resource-poster").forEach((item) => {
+    if (!item.querySelector("img")) observer.observe(item);
+  });
+}
+
+async function resourceDetails(resource) {
+  let work = matchedWork(resource);
+  if (!work) {
+    modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal resource-detail-modal"><button class="modal-close">×</button><div class="empty-state compact"><span class="spinner"></span><h2>正在匹配影视资料</h2><p>从 TMDB 获取真实海报和简介…</p></div></section></div>`;
+    modalRoot.querySelector(".modal-close").onclick = close;
+    work = await loadResourceWork(resource);
+  }
+  const m = pm[resource.provider],
+    title = work?.title || resource.normalized_title || resource.title || "未知影视",
+    visual = work?.backdrop || work?.poster || "",
+    validation =
+      resource.validation_state === "valid"
+        ? "检测网站确认有效"
+        : resource.validation_state === "detector_unavailable"
+          ? "检测服务暂时不可用，未判定失效"
+          : "暂不可验证，未判定失效";
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal resource-detail-modal"><button class="modal-close">×</button><div class="detail-visual">${visual ? `<img src="${esc(visual)}" alt="${esc(title)}">` : ""}<div></div><span><small>${m.label} · ${esc(validation)}</small><h2>${esc(title)}</h2><p>${work ? `${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}` : "暂未匹配到 TMDB 影视信息"}</p><p>${esc(work?.overview || "TMDB 暂无该影视简介，网盘资源仍可复制或入库。")}</p></span></div><div class="resource-detail-info"><span><b>网盘来源</b>${m.label}</span><span><b>画质</b>${esc(resource.quality || "待识别")}</span><span><b>搜索来源</b>${esc(resource.source || "未知")}</span></div><footer><button data-copy-detail>复制链接</button><button class="primary" data-intake-detail>一键入库</button></footer></section></div>`;
+  modalRoot.querySelector(".modal-close").onclick = close;
+  modalRoot.querySelector("[data-copy-detail]").onclick = () =>
+    navigator.clipboard.writeText(resource.url).then(() => toast("链接已复制"));
+  modalRoot.querySelector("[data-intake-detail]").onclick = () => {
+    close();
+    intake(resource);
+  };
 }
 
 function following() {
@@ -396,6 +524,23 @@ function bind() {
         (e.onclick = () =>
           loadRanking(state.rankingType, Number(e.dataset.rankingPage))),
     );
+  const rankingFilterForm = document.querySelector("#rankingFilters");
+  if (rankingFilterForm)
+    rankingFilterForm.onchange = () => {
+      const data = new FormData(rankingFilterForm);
+      state.rankingFilters = {
+        year: String(data.get("year") || ""),
+        genre: String(data.get("genre") || ""),
+        country: String(data.get("country") || ""),
+      };
+      loadRanking(state.rankingType, 1);
+    };
+  const resetRankingFilters = document.querySelector("#resetRankingFilters");
+  if (resetRankingFilters)
+    resetRankingFilters.onclick = () => {
+      state.rankingFilters = { year: "", genre: "", country: "" };
+      loadRanking(state.rankingType, 1);
+    };
   const sf = document.querySelector("#resourceSearch");
   if (sf)
     sf.onsubmit = (e) => {
@@ -408,6 +553,15 @@ function bind() {
       (e.onclick = () => {
         state.provider = e.dataset.providerFilter;
         render();
+      }),
+  );
+  document.querySelectorAll("[data-resource-detail]").forEach(
+    (e) =>
+      (e.onclick = () => {
+        const resource = (state.search?.resources || []).find(
+          (item) => item.fingerprint === e.dataset.resourceDetail,
+        );
+        if (resource) resourceDetails(resource);
       }),
   );
   document
@@ -479,6 +633,7 @@ function bind() {
   if (tp) tp.onclick = testPansou;
   const tc = document.querySelector("#testChecker");
   if (tc) tc.onclick = testChecker;
+  if (document.querySelector(".resource-poster")) hydrateResourcePosters();
 }
 async function search() {
   const out = document.querySelector("#searchOutput");
@@ -560,7 +715,7 @@ function intake(x, target = "") {
   const m = pm[x.provider];
   formModal(
     "一键入库",
-    `<div class="chosen-resource"><i style="background:${m.color}">${m.short}</i><span><b>${esc(state.query || x.normalized_title || x.title)}</b><small>${m.label}链接只能存入${m.label}</small></span></div><label>影视名称<input name="title" value="${esc(state.query || x.normalized_title || x.title)}" required></label><input type="hidden" name="share_url" value="${esc(x.url)}"><label>目标网盘<input value="${m.label}" disabled></label><label>目标目录<div class="directory-input"><input name="target_folder" value="${esc(target)}" placeholder="请逐级选择真实目录" readonly required><button type="button" id="pickDirectory">选择目录</button></div></label><aside class="form-warning">确认时会再次验证链接。失效、暂不可验证或未授权都不会进入任务队列。</aside>`,
+    `<div class="chosen-resource"><i style="background:${m.color}">${m.short}</i><span><b>${esc(state.query || x.normalized_title || x.title)}</b><small>${m.label}链接只能存入${m.label}</small></span></div><label>影视名称<input name="title" value="${esc(state.query || x.normalized_title || x.title)}" required></label><input type="hidden" name="share_url" value="${esc(x.url)}"><label>目标网盘<input value="${m.label}" disabled></label><label>目标目录<div class="directory-input"><input name="target_folder" value="${esc(target)}" placeholder="请逐级选择真实目录" readonly required><button type="button" id="pickDirectory">选择目录</button></div></label><aside class="form-warning">确认时会再次交给你的检测网站验证；只有明确判定失效或网盘未授权时才会阻止入库。</aside>`,
     async (d) => {
       d.auto_organize = true;
       await api("/api/intake", { method: "POST", body: JSON.stringify(d) });

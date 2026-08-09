@@ -56,7 +56,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.4", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.5", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -162,7 +162,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.4", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.5", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -316,11 +316,12 @@ async def check_external_links(urls: list[str]):
     )
 
 
-async def current_trending(media_type: str = "all", page: int = 1) -> dict:
+async def current_trending(media_type: str = "all", page: int = 1, year: int | None = None,
+                           genre: str | None = None, country: str | None = None) -> dict:
     config = tmdb_config()
     return await trending_tmdb(settings, media_type, api_key=config["api_key"],
                                language=config["language"], region=config["region"],
-                               page=page)
+                               page=page, year=year, genre=genre, country=country)
 
 
 @app.get("/api/providers")
@@ -469,9 +470,12 @@ async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
 
 @app.get("/api/tmdb/trending")
 async def tmdb_trending(media_type: str = "all", page: int = Query(default=1, ge=1, le=500),
+                        year: int | None = Query(default=None, ge=1900, le=2200),
+                        genre: str | None = Query(default=None, pattern="^(action|animation|comedy|crime|documentary|drama|family|mystery|romance|scifi)$"),
+                        country: str | None = Query(default=None, pattern="^(CN|US|GB|JP|KR|HK|TW|IN|FR|DE)$"),
                         _: str = Depends(require_login)):
     try:
-        return await current_trending(media_type, page)
+        return await current_trending(media_type, page, year, genre, country)
     except Exception as error:
         raise HTTPException(502, f"TMDB榜单查询失败：{error}") from error
 

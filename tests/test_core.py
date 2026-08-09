@@ -247,12 +247,18 @@ def test_tmdb_discover_supports_24_item_logical_pages():
             assert params["sort_by"] == "primary_release_date.desc"
             assert "primary_release_date.lte" in params
             assert params["vote_count.gte"] == 10
+            assert params["primary_release_date.gte"] == "2025-01-01"
+            assert params["primary_release_date.lte"] == "2025-12-31"
+            assert params["primary_release_year"] == 2025
+            assert "region" not in params
+            assert params["with_genres"] == 28
+            assert params["with_origin_country"] == "CN"
             return Response(params["page"])
 
     client = Client()
     result = asyncio.run(_discover_tmdb_media(
         client, "movie", api_key="key", language="zh-CN", region="CN",
-        page=2, page_size=RANKING_PAGE_SIZE,
+        page=2, page_size=RANKING_PAGE_SIZE, year=2025, genre="action", country="CN",
     ))
     assert client.pages == [2, 3]
     assert len(result["items"]) == 24
@@ -264,6 +270,8 @@ def test_home_ranking_is_paginated_and_has_no_date_limit():
     javascript = Path("app/static/app.js").read_text(encoding="utf-8")
     assert "每页 24 部" in javascript
     assert "data-ranking-page" in javascript
+    assert 'id="rankingFilters"' in javascript
+    assert "国家/地区" in javascript
     assert "全量内容，不限制日期" in javascript
     assert "tmdb_ranking_window" not in javascript
     assert 'if (!state.overview)' in javascript
