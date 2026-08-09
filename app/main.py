@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
-from .integrations import check_links, rankings, search_pansou, search_tmdb, send_telegram
+from .integrations import check_links, rankings, search_pansou, search_tmdb, send_telegram, tmdb_details
 from .models import (
     CreateFolderRequest,
     CredentialRequest,
@@ -159,7 +159,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.3",
+        "version": "1.0.4",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
     }
@@ -209,6 +209,21 @@ async def ranking_endpoint(
         return await rankings(_integration_values()["tmdb_api_key"], media_type, page, year, genre, country)
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail=f"TMDB 暂时无法访问：{type(error).__name__}") from error
+
+
+@app.get("/api/media/{media_type}/{media_id}")
+async def media_details_endpoint(
+    media_type: str,
+    media_id: int,
+) -> dict[str, Any]:
+    if media_type not in {"movie", "tv"} or media_id < 1:
+        raise HTTPException(status_code=400, detail="影视编号或类型不正确")
+    try:
+        return await tmdb_details(_integration_values()["tmdb_api_key"], media_type, media_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"TMDB 详情暂时无法访问：{type(error).__name__}") from error
 
 
 @app.get("/api/search")

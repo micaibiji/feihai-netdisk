@@ -243,6 +243,32 @@ async def search_tmdb(api_key: str, query: str) -> list[dict[str, Any]]:
     return [tmdb_item(item) for item in items if item.get("media_type") in {"movie", "tv"}][:10]
 
 
+async def tmdb_details(api_key: str, media_type: str, media_id: int) -> dict[str, Any]:
+    if not api_key:
+        raise ValueError("管理员还没有配置 TMDB API 密钥")
+    if media_type not in {"movie", "tv"}:
+        raise ValueError("不支持的影视类型")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"https://api.themoviedb.org/3/{media_type}/{media_id}",
+            params={"api_key": api_key, "language": "zh-CN", "append_to_response": "credits"},
+        )
+        response.raise_for_status()
+        body = response.json()
+    item = tmdb_item({**body, "media_type": media_type})
+    countries = [str(value.get("name") or "").strip() for value in (body.get("production_countries") or [])]
+    if not any(countries):
+        countries = [str(value).strip() for value in (body.get("origin_country") or [])]
+    item.update(
+        {
+            "genres": [str(value.get("name") or "").strip() for value in (body.get("genres") or []) if value.get("name")],
+            "countries": [value for value in countries if value],
+            "cast": [str(value.get("name") or "").strip() for value in ((body.get("credits") or {}).get("cast") or [])[:12] if value.get("name")],
+        }
+    )
+    return item
+
+
 async def _discover(
     client: httpx.AsyncClient,
     api_key: str,

@@ -10,9 +10,21 @@ class ProviderAuthError(RuntimeError):
     pass
 
 
+PAN115_QR_APP = "alipaymini"
+PAN115_QR_TOKEN_URL = f"https://qrcodeapi.115.com/api/1.0/{PAN115_QR_APP}/1.0/token/"
+
+
+def pan115_qr_image_url(uid: str) -> str:
+    return f"https://qrcodeapi.115.com/api/1.0/{PAN115_QR_APP}/1.0/qrcode?{urlencode({'uid': uid})}"
+
+
+def pan115_qr_login_url() -> str:
+    return f"https://passportapi.115.com/app/1.0/{PAN115_QR_APP}/1.0/login/qrcode/"
+
+
 async def start_115_qr() -> tuple[dict[str, str], dict[str, Any]]:
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        response = await client.get("https://qrcodeapi.115.com/api/1.0/web/1.0/token/")
+        response = await client.get(PAN115_QR_TOKEN_URL)
         response.raise_for_status()
         data = (response.json().get("data") or {})
     uid = str(data.get("uid") or "")
@@ -20,8 +32,8 @@ async def start_115_qr() -> tuple[dict[str, str], dict[str, Any]]:
         raise ProviderAuthError("115 没有返回可用二维码，请稍后重试")
     secret = {"uid": uid, "time": data["time"], "sign": data["sign"]}
     return {
-        "qr_image_url": f"https://qrcodeapi.115.com/api/1.0/mac/1.0/qrcode?{urlencode({'uid': uid})}",
-        "message": "请用 115 手机客户端扫码，并在手机上确认登录",
+        "qr_image_url": pan115_qr_image_url(uid),
+        "message": "请用 115 手机 App 扫码确认；本次将绑定为支付宝小程序端",
     }, secret
 
 
@@ -54,8 +66,8 @@ async def poll_115_qr(secret: dict[str, Any]) -> tuple[str, str, str]:
         if numeric != 2:
             return (*states.get(numeric, ("waiting", "等待扫码")), "")
         login = await client.post(
-            "https://passportapi.115.com/app/1.0/web/1.0/login/qrcode/",
-            data={"account": secret["uid"]},
+            pan115_qr_login_url(),
+            data={"app": PAN115_QR_APP, "account": secret["uid"]},
         )
         login.raise_for_status()
         cookie = (login.json().get("data") or {}).get("cookie") or {}

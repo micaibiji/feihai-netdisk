@@ -9,10 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import integrations
+from app.integrations import tmdb_details
 from app.providers.baidu import BaiduAdapter
 from app.providers.base import BrowserSupport, FolderEntry, ShareFile, browser_support
 from app.providers.mobile import MobileAdapter
 from app.providers.pan115 import Pan115Adapter
+from app.providers.auth import PAN115_QR_APP, PAN115_QR_TOKEN_URL, pan115_qr_image_url, pan115_qr_login_url
 from app.providers.quark import QuarkAdapter
 from app.providers.registry import ProviderRegistry
 from app.storage import Store
@@ -132,6 +134,9 @@ class FakeClient:
     async def request(self, *args, **kwargs):
         return FakeResponse(self.response)
 
+    async def get(self, *args, **kwargs):
+        return FakeResponse(self.response)
+
     async def post(self, *args, **kwargs):
         return FakeResponse(self.response)
 
@@ -163,6 +168,24 @@ def test_checker_only_marks_explicit_invalid(monkeypatch) -> None:
     assert result[unknown]["state"] == "unverifiable"
 
 
+def test_tmdb_details_contains_year_country_genre_and_cast(monkeypatch) -> None:
+    FakeClient.response = {
+        "id": 100,
+        "title": "测试电影",
+        "release_date": "2026-08-10",
+        "overview": "测试简介",
+        "production_countries": [{"name": "中国大陆"}],
+        "genres": [{"name": "剧情"}],
+        "credits": {"cast": [{"name": "演员甲"}, {"name": "演员乙"}]},
+    }
+    monkeypatch.setattr(integrations.httpx, "AsyncClient", FakeClient)
+    details = asyncio.run(tmdb_details("key", "movie", 100))
+    assert details["year"] == "2026"
+    assert details["countries"] == ["中国大陆"]
+    assert details["genres"] == ["剧情"]
+    assert details["cast"] == ["演员甲", "演员乙"]
+
+
 @pytest.fixture
 def web_client(tmp_path: Path, monkeypatch):
     import app.main as main
@@ -179,7 +202,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.3"
+    assert health["version"] == "1.0.4"
     assert health["port_policy"] == "single-port"
     assert client.get("/api/admin/overview").status_code == 401
     response = client.post(
@@ -202,6 +225,7 @@ def test_static_page_has_guest_copy_and_no_public_directory(web_client) -> None:
     assert "复制链接" in html
     assert "公开目录" not in html
     assert "OpenList" not in html
+    assert 'id="episodeList"' in html
 
 
 def test_compose_exposes_only_product_port() -> None:
@@ -214,6 +238,16 @@ def test_compose_exposes_only_product_port() -> None:
 def test_frontend_has_only_one_delegated_click_handler() -> None:
     script = Path("app/static/app.js").read_text(encoding="utf-8")
     assert script.count("document.addEventListener('click'") == 1
+    assert 'data-intro-search="${esc(media.title||item.title)}"' in script
+    assert "document.execCommand('copy')" in script
+    assert "data-episode-file" in script
+
+
+def test_115_qr_login_uses_alipay_mini_device_type() -> None:
+    assert PAN115_QR_APP == "alipaymini"
+    assert "/alipaymini/1.0/token/" in PAN115_QR_TOKEN_URL
+    assert "/alipaymini/1.0/qrcode?" in pan115_qr_image_url("test-uid")
+    assert "/app/1.0/alipaymini/1.0/login/qrcode/" in pan115_qr_login_url()
 
 
 def test_mobile_layout_has_compact_navigation_and_filters() -> None:
@@ -222,3 +256,5 @@ def test_mobile_layout_has_compact_navigation_and_filters() -> None:
     assert "grid-template-columns:repeat(auto-fit,minmax(92px,1fr))" in css
     assert ".resource-filters strong{flex:0 0 100%" in css
     assert ".resource-grid .resource-actions{grid-template-columns:repeat(2,minmax(0,1fr))" in css
+    assert ".resource-grid .resource-card:hover{box-shadow:" in css
+    assert ".resource-grid .resource-card:hover{transform:" not in css

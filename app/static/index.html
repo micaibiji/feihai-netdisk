@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.3">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.4">
 </head>
 <body>
   <header class="topbar">
@@ -124,7 +124,17 @@
   </dialog>
 
   <dialog id="introDialog" class="modal intro-modal"><button class="modal-close" data-close>×</button><div id="introContent"></div></dialog>
-  <dialog id="playDialog" class="modal player-modal"><button class="modal-close light" data-close>×</button><div class="player-head"><p class="eyebrow">临时播放</p><h2 id="playerTitle">正在准备</h2><p>最后一次播放 48 小时后自动从网盘临时目录删除。</p></div><video id="videoPlayer" controls playsinline preload="metadata"></video></dialog>
+  <dialog id="playDialog" class="modal player-modal">
+    <button class="modal-close light" data-close>×</button>
+    <div class="player-layout">
+      <section class="player-main">
+        <div class="player-head"><p class="eyebrow">飞海影院 · 临时播放</p><h2 id="playerTitle">选择集数开始播放</h2><p id="playerSubtitle">最后一次播放 48 小时后自动从网盘临时目录删除。</p></div>
+        <div class="player-video-box"><video id="videoPlayer" controls playsinline preload="metadata"></video><div id="playerStatus" class="player-status">请选择右侧集数</div></div>
+        <div id="playerMediaInfo" class="player-media-info"></div>
+      </section>
+      <aside class="episode-panel"><div class="episode-head"><h3>选集</h3><span id="episodeCount"></span></div><div id="episodeList" class="episode-list"></div></aside>
+    </div>
+  </dialog>
 
   <dialog id="saveDialog" class="modal save-modal">
     <button class="modal-close" data-close>×</button><p class="eyebrow">管理员 · 同网盘保存</p><h2>选择内容与保存目录</h2><p id="saveProviderRule"></p>
@@ -136,6 +146,6 @@
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=1.0.4" defer></script>
 </body>
 </html>
