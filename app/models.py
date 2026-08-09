@@ -6,136 +6,69 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 class ProviderName(StrEnum):
-    CHINA_MOBILE = "china_mobile"
-    QUARK = "quark"
     BAIDU = "baidu"
+    QUARK = "quark"
     PAN115 = "115"
+    CHINA_MOBILE = "china_mobile"
 
 
-class JobStatus(StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    PAUSED = "paused"
-    CANCELED = "canceled"
-    WAITING_AUTH = "waiting_auth"
-    COMPLETED = "completed"
-    FAILED = "failed"
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=300)
 
 
-class ValidationState(StrEnum):
-    PENDING = "pending"
-    VALID = "valid"
-    INVALID = "invalid"
-    UNVERIFIABLE = "unverifiable"
-
-
-class AuthSessionState(StrEnum):
-    WAITING = "waiting"
-    SCANNED = "scanned"
-    SUCCEEDED = "succeeded"
-    EXPIRED = "expired"
-    CANCELED = "canceled"
-    FAILED = "failed"
-
-
-class IntakeRequest(BaseModel):
-    share_url: HttpUrl
-    title: str = Field(min_length=1, max_length=200)
-    target_folder: str = Field(default="影视", max_length=300)
-    auto_organize: bool = True
-
-
-class StrmRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    play_url: HttpUrl
-    relative_dir: str = Field(default="未分类", max_length=300)
-
-
-class NotifyRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=1000)
-
-
-class SubscriptionRequest(BaseModel):
-    keyword: str = Field(min_length=1, max_length=100)
-    auto_intake: bool = True
-    media_type: str = Field(default="tv", pattern="^(movie|tv|anime|variety|documentary)$")
-    year: int | None = Field(default=None, ge=1900, le=2200)
-
-
-class SubscriptionSourceRequest(BaseModel):
-    share_url: HttpUrl
-    title: str = Field(default="", max_length=300)
-    season: int = Field(default=1, ge=0, le=200)
-    episode: int = Field(default=0, ge=0, le=10000)
-    quality: str = Field(default="", max_length=80)
-    source: str = Field(default="manual", max_length=120)
-
-
-class SettingsRequest(BaseModel):
-    telegram_enabled: bool = True
-    auto_metadata: bool = True
-    auto_subtitles: bool = True
-    auto_organize: bool = True
-    fnos_library_path: str = Field(default="/app/strm", max_length=500)
-    naming_language: str = Field(default="zh-CN", max_length=20)
-
-
-class TmdbSettingsRequest(BaseModel):
-    api_key: str = Field(default="", max_length=500)
-    language: str = Field(default="zh-CN", pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
-    region: str = Field(default="CN", pattern=r"^[A-Z]{2}$")
-
-
-class PansouSettingsRequest(BaseModel):
-    base_url: str = Field(min_length=8, max_length=500, pattern=r"^https?://")
-    api_path: str = Field(default="/api/search", min_length=2, max_length=200, pattern=r"^/")
-    source: str = Field(default="all", pattern=r"^(all|tg|plugin)$")
-    username: str = Field(default="", max_length=200)
-    password: str = Field(default="", max_length=500)
-    token: str = Field(default="", max_length=4000)
-    clear_credentials: bool = False
-
-
-class CheckerSettingsRequest(BaseModel):
-    base_url: str = Field(min_length=8, max_length=500, pattern=r"^https?://")
-    api_path: str = Field(default="/api/v1/links/check", min_length=2, max_length=200, pattern=r"^/")
-    token: str = Field(default="", max_length=4000)
-    timeout_seconds: int = Field(default=35, ge=5, le=120)
-    cache_minutes: int = Field(default=120, ge=0, le=10080)
-    clear_token: bool = False
-
-
-class ResourceValidationRequest(BaseModel):
-    share_url: HttpUrl
-    force: bool = False
+class CredentialRequest(BaseModel):
+    credential: str = Field(min_length=6, max_length=20000)
+    kind: str = Field(default="auto", pattern=r"^(auto|cookie|token|oauth)$")
+    account_label: str = Field(default="已授权账号", max_length=80)
 
 
 class DirectoryRequest(BaseModel):
-    path: str = Field(default="/", max_length=1000)
+    parent_id: str = Field(default="", max_length=1000)
+    parent_path: str = Field(default="/", max_length=1500)
 
 
-class PublicDirectoryEntry(BaseModel):
+class CreateFolderRequest(BaseModel):
+    parent_id: str = Field(default="", max_length=1000)
+    parent_path: str = Field(default="/", max_length=1500)
+    name: str = Field(min_length=1, max_length=180)
+
+
+class ResourceInspectRequest(BaseModel):
     provider: ProviderName
-    path: str = Field(min_length=1, max_length=1000)
-    label: str = Field(default="", max_length=100)
+    share_url: HttpUrl
+    extraction_code: str = Field(default="", max_length=20)
 
 
-class PublicDirectoriesRequest(BaseModel):
-    entries: list[PublicDirectoryEntry] = Field(default_factory=list, max_length=30)
+class TransferRequest(ResourceInspectRequest):
+    title: str = Field(min_length=1, max_length=300)
+    target_id: str = Field(default="", max_length=1000)
+    target_path: str = Field(default="/", max_length=1500)
+    selected_file_ids: list[str] = Field(default_factory=list, max_length=1000)
+    scope: str = Field(default="all", pattern=r"^(single|season|all)$")
+    duplicate_policy: str = Field(default="skip", pattern=r"^(skip|keep_both)$")
 
 
-class PublicDirectoryBrowseRequest(BaseModel):
-    path: str = Field(default="", max_length=1000)
+class PreparePlayRequest(ResourceInspectRequest):
+    title: str = Field(min_length=1, max_length=300)
+    file_id: str = Field(default="", max_length=1000)
 
 
-class ProviderCredentialRequest(BaseModel):
-    credential: str = Field(min_length=6, max_length=12000)
-    account_mask: str = Field(default="已授权账号", max_length=100)
+class KeepTemporaryRequest(BaseModel):
+    target_id: str = Field(default="", max_length=1000)
+    target_path: str = Field(default="/", max_length=1500)
+    duplicate_policy: str = Field(default="skip", pattern=r"^(skip|keep_both)$")
 
 
-class ResourceResult(BaseModel):
-    provider: ProviderName
-    title: str
-    url: HttpUrl
-    source: str = "unknown"
-    datetime: str | None = None
+class IntegrationSettingsRequest(BaseModel):
+    pansou_url: str = Field(default="", max_length=500)
+    checker_url: str = Field(default="", max_length=500)
+    tmdb_api_key: str = Field(default="", max_length=500)
+    telegram_bot_token: str = Field(default="", max_length=500)
+    telegram_chat_id: str = Field(default="", max_length=100)
+
+
+class SubscriptionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    media_type: str = Field(default="tv", pattern=r"^(movie|tv|anime)$")
+    year: int | None = Field(default=None, ge=1900, le=2200)

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
+  <title>飞海网盘</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" data-page="home" aria-label="返回首页">
+      <span class="brand-mark"><i></i><i></i><i></i></span>
+      <span>飞海网盘</span><small>PRIVATE</small>
+    </button>
+    <form id="topSearch" class="top-search">
+      <span>⌕</span><input id="topSearchInput" placeholder="搜索影视作品与网盘资源" autocomplete="off"><kbd>Enter</kbd>
+    </form>
+    <nav id="mainNav" class="main-nav">
+      <button data-page="home" class="active">首页</button>
+      <button data-page="search">资源搜索</button>
+      <button data-page="subscriptions" data-admin>我的追更</button>
+      <button data-page="jobs" data-admin>任务</button>
+      <button data-page="accounts" data-admin>网盘账号</button>
+      <button data-page="settings" data-admin>设置</button>
+    </nav>
+    <button id="sessionButton" class="session-button">管理员登录</button>
+  </header>
+
+  <main>
+    <section id="page-home" class="page active">
+      <div id="hero" class="hero">
+        <div class="hero-copy">
+          <p id="heroEyebrow" class="eyebrow">飞海网盘 · 网页观影</p>
+          <h1 id="heroTitle">想看的内容，<br>搜索后直接播放</h1>
+          <p id="heroOverview">仅为确认适合网页播放的格式提供播放按钮；所有未失效链接都可复制。</p>
+          <div id="heroMeta" class="hero-meta"></div>
+          <button id="heroSearch" class="primary large" data-page="search">开始搜索资源</button>
+          <div id="heroDots" class="hero-dots"></div>
+        </div>
+        <div class="hero-card">
+          <span>播放规则</span>
+          <strong>MP4 · H.264 · AAC</strong>
+          <p>播放时同盘保存到“影视临时播放”，最后一次播放 48 小时后自动清理。</p>
+        </div>
+      </div>
+
+      <section class="content-section ranking-section">
+        <div class="section-heading">
+          <div><p class="eyebrow">全量影视排行</p><h2>最新上映与热门内容</h2><p id="rankingMessage" class="muted">正在读取实时影视数据…</p></div>
+          <div class="segment" id="typeFilter">
+            <button data-value="tv">剧集</button><button data-value="movie">电影</button><button data-value="all" class="active">全部</button>
+          </div>
+        </div>
+        <div id="quickCategory" class="quick-filter-row">
+          <strong>分类</strong><button class="active" data-quick="all">综合</button><button data-country="CN">国产</button><button data-country="US">欧美</button><button data-country="JP">日剧/日影</button><button data-country="KR">韩剧/韩影</button><button data-genre="animation">动画</button><button data-genre="documentary">纪录片</button>
+        </div>
+        <div id="quickYear" class="quick-filter-row year-row"><strong>年份</strong><button class="active" data-year="">全部年份</button><button data-year="2026">2026</button><button data-year="2025">2025</button><button data-year="2024">2024</button><button data-year="2023">2023</button><button data-year="2022">2022</button><button data-year="2021">2021</button><button data-year="2020">2020</button></div>
+        <div class="filter-row">
+          <label>更多年份<select id="yearFilter"><option value="">全部年份</option></select></label>
+          <label>更多类型<select id="genreFilter"><option value="">全部类型</option><option value="action">动作</option><option value="animation">动画</option><option value="comedy">喜剧</option><option value="crime">犯罪</option><option value="documentary">纪录</option><option value="drama">剧情</option><option value="family">家庭</option><option value="mystery">悬疑</option><option value="romance">爱情</option><option value="scifi">科幻</option></select></label>
+          <label>更多地区<select id="countryFilter"><option value="">全部地区</option><option value="CN">中国大陆</option><option value="HK">中国香港</option><option value="TW">中国台湾</option><option value="US">美国</option><option value="KR">韩国</option><option value="JP">日本</option><option value="GB">英国</option></select></label>
+        </div>
+        <div id="rankingGrid" class="poster-grid skeleton-grid"></div>
+        <div id="rankingPager" class="pager"></div>
+      </section>
+    </section>
+
+    <section id="page-search" class="page">
+      <div class="page-head">
+        <p class="eyebrow">PanSou + 你的链接检测网站</p>
+        <h1>资源搜索</h1>
+        <p>检测网站明确判定失效的链接会隐藏；有效或无法判断的链接正常展示。</p>
+      </div>
+      <form id="searchForm" class="search-panel">
+        <input id="searchInput" placeholder="输入电影、电视剧或动漫名称" autocomplete="off">
+        <button class="primary" type="submit">搜索</button>
+      </form>
+      <div id="searchSummary" class="search-summary hidden"></div>
+      <div id="mediaMatches" class="media-matches"></div>
+      <div id="resourceFilters" class="resource-filters hidden">
+        <strong>网盘资源</strong>
+        <button data-provider="all" class="active">全部</button>
+        <button data-provider="baidu">百度</button><button data-provider="quark">夸克</button>
+        <button data-provider="115">115</button><button data-provider="china_mobile">移动</button>
+        <span id="resourceCount"></span>
+      </div>
+      <div id="resourceList" class="resource-list resource-grid"></div>
+    </section>
+
+    <section id="page-subscriptions" class="page admin-page">
+      <div class="page-head"><p class="eyebrow">管理员功能</p><h1>我的追更</h1><p>追更只记录作品，不替你自动选择或覆盖网盘版本。</p></div>
+      <form id="subscriptionForm" class="inline-form card"><input id="subscriptionTitle" placeholder="影视名称"><select id="subscriptionType"><option value="tv">电视剧</option><option value="anime">动漫</option><option value="movie">电影</option></select><input id="subscriptionYear" type="number" placeholder="年份"><button class="primary">添加追更</button></form>
+      <div id="subscriptionList" class="simple-list"></div>
+    </section>
+
+    <section id="page-jobs" class="page admin-page">
+      <div class="page-head"><p class="eyebrow">管理员功能</p><h1>任务中心</h1><p>查看同盘保存、临时转永久以及失败原因。</p></div>
+      <div id="jobList" class="simple-list"></div>
+      <div class="page-head compact"><h2>临时播放文件</h2><p>从最后一次播放开始计算 48 小时。</p></div>
+      <div id="tempList" class="simple-list"></div>
+    </section>
+
+    <section id="page-accounts" class="page admin-page">
+      <div class="page-head"><p class="eyebrow">凭证只加密保存在本机 NAS</p><h1>网盘账号</h1><p>四个网盘互不排序；每个网盘使用它最可靠的授权方式。</p></div>
+      <div id="accountGrid" class="account-grid"></div>
+    </section>
+
+    <section id="page-settings" class="page admin-page">
+      <div class="page-head"><p class="eyebrow">只使用 12366 端口</p><h1>系统设置</h1><p>飞海网盘不会额外开放其他管理端口。</p></div>
+      <form id="settingsForm" class="settings-grid">
+        <article class="settings-card"><div class="settings-title"><span>搜</span><div><h2>资源搜索与检测</h2><p>连接你自己部署的服务</p></div></div><label>PanSou 地址<input id="pansouUrl" placeholder="http://192.168.100.213:8888"></label><label>网盘检测网站<input id="checkerUrl" placeholder="http://192.168.100.213:12110"></label></article>
+        <article class="settings-card"><div class="settings-title"><span>影</span><div><h2>TMDB 影视数据</h2><p>海报、简介、排行与筛选</p></div></div><label>TMDB API 密钥 <a href="https://developer.themoviedb.org/docs/getting-started" target="_blank" rel="noreferrer">获取与填写教程 ↗</a><input id="tmdbKey" type="password" placeholder="已配置时留空不会覆盖"></label></article>
+        <article class="settings-card"><div class="settings-title"><span>通</span><div><h2>Telegram 通知</h2><p>永久保存完成后通知</p></div></div><label>Bot Token<input id="telegramToken" type="password" placeholder="已配置时留空不会覆盖"></label><label>Chat ID<input id="telegramChatId" placeholder="例如 123456789"></label></article>
+        <button class="primary save-settings" type="submit">保存设置</button>
+      </form>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <dialog id="loginDialog" class="modal small-modal">
+    <form id="loginForm" method="dialog"><button class="modal-close" value="cancel">×</button><p class="eyebrow">管理员验证</p><h2>进入后台管理</h2><p>访客无需登录即可搜索、复制链接和在线播放。</p><label>管理员账号<input id="loginUsername" autocomplete="username" value="admin"></label><label>验证密码<input id="loginPassword" type="password" autocomplete="current-password"></label><button id="loginSubmit" class="primary full" type="submit">验证并进入</button></form>
+  </dialog>
+
+  <dialog id="introDialog" class="modal intro-modal"><button class="modal-close" data-close>×</button><div id="introContent"></div></dialog>
+  <dialog id="playDialog" class="modal player-modal"><button class="modal-close light" data-close>×</button><div class="player-head"><p class="eyebrow">临时播放</p><h2 id="playerTitle">正在准备</h2><p>最后一次播放 48 小时后自动从网盘临时目录删除。</p></div><video id="videoPlayer" controls playsinline preload="metadata"></video></dialog>
+
+  <dialog id="saveDialog" class="modal save-modal">
+    <button class="modal-close" data-close>×</button><p class="eyebrow">管理员 · 同网盘保存</p><h2>选择内容与保存目录</h2><p id="saveProviderRule"></p>
+    <div id="fileScope" class="file-scope"></div>
+    <div class="directory-head"><div><strong>保存到</strong><span id="directoryPath">/</span></div><button id="createFolderButton" class="ghost">新建文件夹</button></div>
+    <div id="directoryBreadcrumbs" class="breadcrumbs"></div><div id="directoryList" class="directory-list"></div>
+    <label class="duplicate-field">发现同名版本时<select id="duplicatePolicy"><option value="skip">相同内容跳过</option><option value="keep_both">不同版本保留两份</option></select></label>
+    <button id="confirmSave" class="primary full">确认同盘保存</button>
+  </dialog>
+
+  <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

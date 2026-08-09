@@ -3,7 +3,6 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+*.zip
 data/*
 !data/.gitkeep
-strm/*
-!strm/.gitkeep

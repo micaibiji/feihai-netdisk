@@ -1,22 +1,12 @@
 services:
   feihai-drive:
     build: .
+    image: feihai-drive:1.0.2
     container_name: feihai-drive
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      NATIVE_MOUNT_BASE: /mnt/netdisk
-      NATIVE_MOUNT_PROVIDERS: ${NATIVE_MOUNT_PROVIDERS:-}
     ports:
       - "12366:12366"
+    env_file:
+      - .env
     volumes:
-      - ./app:/app/app:ro
-      - ${FEIHAI_DATA_PATH:-./data}:/app/data
-      - ${FNTV_STRM_PATH:-./strm}:/app/strm
-      - ${FNOS_115_PATH:-./netdisk/115}:/mnt/netdisk/115:rslave
-      - ${FNOS_BAIDU_PATH:-./netdisk/baidu}:/mnt/netdisk/baidu:rslave
-      - ${FNOS_QUARK_PATH:-./netdisk/quark}:/mnt/netdisk/quark:rslave
-      - ${FNOS_MOBILE_PATH:-./netdisk/china_mobile}:/mnt/netdisk/china_mobile:rslave
-    security_opt:
-      - no-new-privileges:true
+      - ./data:/app/data

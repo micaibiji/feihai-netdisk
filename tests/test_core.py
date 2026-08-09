@@ -1,444 +1,216 @@
-from pathlib import Path
-import asyncio
-from dataclasses import replace
-import importlib
+from __future__ import annotations
 
+import base64
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
-from app.config import Settings
-from app.main import (SESSION_COOKIE, SESSION_MAX_AGE, app, create_session_token, settings,
-                      validate_session_token)
-from app.models import ProviderName
-from app.provider_auth import parse_115_qr_state
-from app.providers import ProviderRegistry
-from app.services import (RANKING_PAGE_SIZE, _discover_tmdb_media, _find_urls,
-                          _find_contexts, create_media_bundle, decode_pansou_json, generate_strm,
-                          media_folder, media_relative_path, parse_episode, safe_name,
-                          trending_tmdb)
-from app.storage import JobStore
-from app.validation import should_show_resource, validate_share_urls
+from app import integrations
+from app.providers.baidu import BaiduAdapter
+from app.providers.base import BrowserSupport, FolderEntry, ShareFile, browser_support
+from app.providers.mobile import MobileAdapter
+from app.providers.pan115 import Pan115Adapter
+from app.providers.quark import QuarkAdapter
+from app.providers.registry import ProviderRegistry
+from app.storage import Store
 from app.vault import CredentialVault
 
-main_module = importlib.import_module("app.main")
+
+@pytest.mark.parametrize(
+    ("url", "provider"),
+    [
+        ("https://pan.baidu.com/s/abc", "baidu"),
+        ("https://pan.quark.cn/s/abc", "quark"),
+        ("https://115.com/s/abc", "115"),
+        ("https://yun.139.com/share/abc", "china_mobile"),
+    ],
+)
+def test_provider_detection(url: str, provider: str) -> None:
+    assert ProviderRegistry.detect(url) == provider
 
 
-def test_detect_supported_providers():
-    assert ProviderRegistry.detect("https://pan.baidu.com/s/abc").name == ProviderName.BAIDU
-    assert ProviderRegistry.detect("https://pan.quark.cn/s/abc").name == ProviderName.QUARK
-    assert ProviderRegistry.detect("https://115.com/s/abc").name == ProviderName.PAN115
-    assert ProviderRegistry.detect("https://yun.139.com/share/abc").name == ProviderName.CHINA_MOBILE
+def test_mobile_directory_detection_does_not_treat_file_type_one_as_folder() -> None:
+    assert MobileAdapter._is_dir({"fileType": 0}) is True
+    assert MobileAdapter._is_dir({"fileType": 1}) is False
+    assert MobileAdapter._is_dir({"isFolder": True}) is True
 
 
-def test_provider_display_order():
-    assert [item["name"] for item in ProviderRegistry.states()] == [
-        "115",
-        "baidu",
-        "quark",
-        "china_mobile",
-    ]
+@pytest.mark.parametrize(
+    ("name", "playable"),
+    [
+        ("电影.1080p.H264.AAC.mp4", True),
+        ("电影.webm", True),
+        ("电影.HEVC.mp4", False),
+        ("电影.Dolby.Vision.mp4", False),
+        ("电影.H264.mkv", False),
+        ("电影.mp3", False),
+    ],
+)
+def test_browser_support_is_conservative(name: str, playable: bool) -> None:
+    assert browser_support(name).playable is playable
 
 
-def test_safe_media_folder():
-    assert safe_name('电影:测试?') == "电影_测试_"
-    assert media_folder("流浪地球", "movie", 2019) == "电影/流浪地球 (2019)"
+def test_share_url_parsers() -> None:
+    assert QuarkAdapter.parse_share("https://pan.quark.cn/s/abc123", "") == ("abc123", "")
+    assert Pan115Adapter.parse_share("https://115.com/s/xyz", "1234") == ("xyz", "1234")
+    assert BaiduAdapter.parse_share("https://pan.baidu.com/s/1abc", "") == ("1abc", "abc", "")
 
 
-def test_generate_strm(tmp_path: Path):
-    settings = Settings(
-        app_name="飞海网盘",
-        admin_username="admin",
-        admin_password="secret",
-        data_dir=tmp_path / "data",
-        strm_dir=tmp_path / "strm",
-        tmdb_api_key="",
-        telegram_bot_token="",
-        telegram_chat_id="",
-        wecom_webhook_url="",
-        pansou_base_url="http://pansou:8888",
-        provider_priority=("115", "baidu", "quark", "china_mobile"),
-        subscription_interval_seconds=1800,
+def test_mobile_token_parses_account() -> None:
+    token = base64.b64encode(b"client:13800138000:secret").decode()
+    adapter = MobileAdapter(token)
+    assert adapter.account == "13800138000"
+
+
+def test_vault_encrypts_plaintext(tmp_path: Path) -> None:
+    vault = CredentialVault(tmp_path)
+    vault.save("quark", "cookie=secret")
+    assert vault.load("quark") == "cookie=secret"
+    assert b"cookie=secret" not in (tmp_path / "credentials" / "quark.token").read_bytes()
+
+
+def test_store_uses_new_prefixed_schema(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.db")
+    store.initialize()
+    assert {item["provider"] for item in store.accounts()} == {"baidu", "quark", "115", "china_mobile"}
+    with store.connect() as db:
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "fh_accounts" in names
+    assert all(name.startswith("fh_") or name == "sqlite_sequence" for name in names)
+
+
+def test_temp_last_played_can_be_extended(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.db")
+    store.initialize()
+    now = datetime.now(UTC)
+    store.add_temp(
+        {
+            "id": "one",
+            "provider": "quark",
+            "title": "测试",
+            "share_url": "https://pan.quark.cn/s/abc",
+            "cloud_file_id": "f1",
+            "file_name": "测试.mp4",
+            "last_played_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=48)).isoformat(),
+            "created_at": now.isoformat(),
+        }
     )
-    target = generate_strm(settings, "电影/测试", "测试电影", "https://example.com/play")
-    assert target.read_text(encoding="utf-8") == "https://example.com/play\n"
+    later = now + timedelta(hours=2)
+    store.touch_temp("one", later.isoformat(), (later + timedelta(hours=48)).isoformat())
+    assert store.temp("one")["last_played_at"] == later.isoformat()
 
 
-def test_find_urls_in_search_payload():
-    payload = {
+class FakeResponse:
+    def __init__(self, body, status_code: int = 200):
+        self._body = body
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def json(self):
+        return self._body
+
+
+class FakeClient:
+    response = {}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def request(self, *args, **kwargs):
+        return FakeResponse(self.response)
+
+    async def post(self, *args, **kwargs):
+        return FakeResponse(self.response)
+
+
+def test_pansou_parsing_keeps_all_four_providers(monkeypatch) -> None:
+    FakeClient.response = {
         "results": [
-            {"content": "115资源 https://115.com/s/abc"},
-            {"links": ["https://pan.baidu.com/s/xyz"]},
+            {"title": "作品 1080P", "url": "https://pan.baidu.com/s/abc"},
+            {"title": "作品 4K", "url": "https://pan.quark.cn/s/def"},
+            {"title": "作品 S01E02", "url": "https://115.com/s/ghi"},
+            {"title": "作品", "url": "https://yun.139.com/share/jkl"},
         ]
     }
-    assert _find_urls(payload) == ["https://115.com/s/abc", "https://pan.baidu.com/s/xyz"]
+    monkeypatch.setattr(integrations.httpx, "AsyncClient", FakeClient)
+    items = asyncio.run(integrations.search_pansou("http://pansou", "作品"))
+    assert {item["provider"] for item in items} == {"baidu", "quark", "115", "china_mobile"}
+    assert len({item["fingerprint"] for item in items}) == 4
 
 
-def test_nested_pansou_payload_uses_resource_context_instead_of_success():
-    payload = {
-        "success": True,
-        "results": [{
-            "channel": "netdisk",
-            "content": "汪汪队立大功大电影3 4K https://pan.baidu.com/s/example",
-        }],
-    }
-    contexts = _find_contexts(payload, "汪汪队立大功大电影3")
-    assert contexts == [(
-        "https://pan.baidu.com/s/example",
-        "汪汪队立大功大电影3 4K",
-        "netdisk",
-    )]
+def test_checker_only_marks_explicit_invalid(monkeypatch) -> None:
+    good = "https://pan.baidu.com/s/good"
+    bad = "https://pan.quark.cn/s/bad"
+    unknown = "https://115.com/s/unknown"
+    FakeClient.response = {"valid_links": [good], "invalid_links": [bad], "pending_links": []}
+    monkeypatch.setattr(integrations.httpx, "AsyncClient", FakeClient)
+    result = asyncio.run(integrations.check_links("http://checker", [good, bad, unknown]))
+    assert result[good]["state"] == "valid"
+    assert result[bad]["state"] == "invalid"
+    assert result[unknown]["state"] == "unverifiable"
 
 
-def test_pansou_json_tolerates_one_malformed_plugin_title():
-    result = decode_pansou_json(b'{"results":[{"content":"ok\xe6\xaf"}]}')
-    assert result["results"][0]["content"].startswith("ok")
+@pytest.fixture
+def web_client(tmp_path: Path, monkeypatch):
+    import app.main as main
 
-
-def test_external_checker_maps_valid_invalid_and_pending(monkeypatch):
-    class Response:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "valid_links": ["https://115.com/s/ok"],
-                "invalid_links": ["https://pan.baidu.com/s/gone"],
-                "pending_links": ["https://pan.quark.cn/s/wait"],
-            }
-
-    class Client:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def post(self, url, json, headers):
-            assert url == "http://checker.local/api/v1/links/check"
-            assert json["selectedPlatforms"] == ["pan115", "baidu", "quark"]
-            assert headers == {"Authorization": "Bearer secret"}
-            return Response()
-
-    monkeypatch.setattr("app.validation.httpx.AsyncClient", Client)
-    urls = [
-        "https://115.com/s/ok",
-        "https://pan.baidu.com/s/gone",
-        "https://pan.quark.cn/s/wait",
-    ]
-    result = asyncio.run(validate_share_urls(
-        urls, base_url="http://checker.local", token="secret",
-    ))
-    assert [result[url].state for url in urls] == ["valid", "invalid", "unverifiable"]
-
-
-def test_only_explicitly_invalid_checker_results_are_hidden():
-    assert should_show_resource("valid") is True
-    assert should_show_resource("unverifiable") is True
-    assert should_show_resource("detector_unavailable") is True
-    assert should_show_resource("invalid") is False
-
-
-def test_unified_naming_rules():
-    assert media_relative_path("流浪地球", "movie", 2019) == "电影/流浪地球 (2019)/流浪地球 (2019).strm"
-    assert media_relative_path("庆余年", "tv", 2019, 1, 3) == "电视剧/庆余年 (2019)/Season 01/庆余年 (2019) - S01E03.strm"
-    assert parse_episode("庆余年 S02E36 4K") == (2, 36)
-    assert parse_episode("更新至20集") == (1, 20)
-
-
-def test_media_bundle_has_strm_and_nfo(tmp_path: Path):
-    settings = Settings(
-        app_name="飞海网盘", admin_username="admin", admin_password="secret",
-        data_dir=tmp_path / "data", strm_dir=tmp_path / "strm", tmdb_api_key="",
-        telegram_bot_token="", telegram_chat_id="", wecom_webhook_url="",
-        pansou_base_url="http://pansou:8888", provider_priority=("115", "baidu", "quark", "china_mobile"),
-        subscription_interval_seconds=1800,
-    )
-    files = create_media_bundle(settings, title="庆余年", media_type="tv", year=2019, season=1, episode=1, play_url="https://example.com/1")
-    assert (settings.strm_dir / files["strm"]).read_text(encoding="utf-8").strip() == "https://example.com/1"
-    assert "<episodedetails>" in (settings.strm_dir / files["nfo"]).read_text(encoding="utf-8")
-
-
-def test_multi_source_selects_latest_then_provider_priority(tmp_path: Path):
-    store = JobStore(tmp_path / "feihai.db")
-    store.initialize()
-    subscription = store.create_subscription("测试剧")
-    priority = ("115", "baidu", "quark", "china_mobile")
-    store.add_subscription_source(subscription["id"], {"provider": "baidu", "url": "https://pan.baidu.com/s/a", "episode": 10}, priority)
-    selected = store.add_subscription_source(subscription["id"], {"provider": "115", "url": "https://115.com/s/a", "episode": 10}, priority)
-    assert selected["provider"] == "115"
-    selected = store.add_subscription_source(subscription["id"], {"provider": "quark", "url": "https://pan.quark.cn/s/a", "episode": 11}, priority)
-    assert selected["provider"] == "quark"
-
-
-def test_credentials_are_encrypted_at_rest(tmp_path: Path):
+    store = Store(tmp_path / "web.db")
     vault = CredentialVault(tmp_path)
-    vault.save("115", "secret-cookie-value")
-    assert vault.load("115") == "secret-cookie-value"
-    assert b"secret-cookie-value" not in (tmp_path / "credentials" / "115.token").read_bytes()
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main, "vault", vault)
+    main._inspect_cache.clear()
+    with TestClient(main.app) as client:
+        yield client, main
 
 
-def test_signed_session_token_expires_and_rejects_tampering():
-    token = create_session_token(settings.admin_username, now=100)
-    assert validate_session_token(token, now=101) == settings.admin_username
-    assert validate_session_token(token, now=100 + SESSION_MAX_AGE + 1) is None
-    assert validate_session_token(token[:-1] + ("A" if token[-1] != "A" else "B"), now=101) is None
-
-
-def test_browser_login_page_replaces_basic_auth_prompt():
-    with TestClient(app) as client:
-        response = client.get("/", follow_redirects=False)
-        assert response.status_code == 200
-        assert 'data-admin="false"' in response.text
-        assert "公开目录" in response.text
-        assert "管理员登录" in response.text
-        unauthorized = client.get("/api/providers")
-        assert unauthorized.status_code == 401
-        assert client.get("/api/overview").status_code == 401
-        assert "www-authenticate" not in unauthorized.headers
-        login = client.post("/login", data={"username": settings.admin_username, "password": settings.admin_password}, follow_redirects=False)
-        assert login.status_code == 303
-        assert login.headers["location"] == "/?verified=1"
-        assert SESSION_COOKIE in login.cookies
-        admin_page = client.get("/")
-        assert admin_page.status_code == 200
-        assert 'data-admin="true"' in admin_page.text
-        assert client.post("/api/verify-password", json={"password": "wrong-password"}).status_code == 401
-        verified = client.post("/api/verify-password", json={"password": settings.admin_password})
-        assert verified.status_code == 200
-        assert verified.json() == {"verified": True}
-
-
-def test_public_directory_is_read_only_and_cannot_escape(tmp_path: Path, monkeypatch):
-    mount = tmp_path / "mounts" / "baidu"
-    (mount / "影视" / "公开" / "子目录").mkdir(parents=True)
-    (mount / "影视" / "私密").mkdir(parents=True)
-    (mount / "影视" / "公开" / "影片.mkv").write_bytes(b"movie")
-    (mount / "影视" / "私密" / "密码.txt").write_text("secret", encoding="utf-8")
-    local_store = JobStore(tmp_path / "data" / "feihai.db")
-    local_store.initialize()
-    local_store.save_settings({"public_directories": [{
-        "provider": "baidu", "path": "/百度网盘/影视/公开", "label": "公开影视",
-    }]})
-    local_settings = replace(settings, data_dir=tmp_path / "data",
-                             native_mount_base=tmp_path / "mounts",
-                             native_mount_providers=("baidu",))
-    monkeypatch.setattr(main_module, "store", local_store)
-    monkeypatch.setattr(main_module, "settings", local_settings)
-
-    with TestClient(app) as client:
-        overview = client.get("/api/public/overview")
-        assert overview.status_code == 200
-        body = overview.json()
-        assert "providers" not in body and "settings" not in body
-        entry = body["public_directories"][0]
-        listing = client.post(f"/api/public/directories/{entry['id']}/browse", json={"path": ""})
-        assert listing.status_code == 200
-        assert {item["name"] for item in listing.json()["contents"]} == {"子目录", "影片.mkv"}
-        stream = client.get(f"/api/public/directories/{entry['id']}/stream",
-                            params={"path": "影片.mkv"})
-        assert stream.status_code == 200
-        assert stream.content == b"movie"
-        assert stream.headers["content-disposition"].startswith("inline;")
-        assert client.post(f"/api/public/directories/{entry['id']}/browse",
-                           json={"path": "../私密"}).status_code == 400
-        assert client.get(f"/api/public/directories/{entry['id']}/stream",
-                          params={"path": "../私密/密码.txt"}).status_code == 400
-        assert client.get("/api/settings/public-directories").status_code == 401
-
-
-def test_resource_cards_do_not_show_validation_placeholders():
-    script = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "暂不可验证" not in script
-    assert "未判定失效" not in script
-    assert "resource-status" not in script
-
-
-def test_tmdb_without_key_returns_no_fake_ranking(tmp_path: Path):
-    local_settings = Settings(
-        app_name="飞海网盘", admin_username="admin", admin_password="secret",
-        data_dir=tmp_path / "data", strm_dir=tmp_path / "strm", tmdb_api_key="",
-        telegram_bot_token="", telegram_chat_id="", wecom_webhook_url="",
-        pansou_base_url="http://pansou:8888", provider_priority=("115", "baidu", "quark", "china_mobile"),
-        subscription_interval_seconds=1800,
+def test_public_health_and_admin_boundary(web_client) -> None:
+    client, main = web_client
+    health = client.get("/api/health").json()
+    assert health["version"] == "1.0.2"
+    assert health["port_policy"] == "single-port"
+    assert client.get("/api/admin/overview").status_code == 401
+    response = client.post(
+        "/api/login",
+        json={"username": main.settings.admin_username, "password": main.settings.admin_password},
     )
-    result = asyncio.run(trending_tmdb(local_settings))
-    assert result["live"] is False
-    assert result["items"] == []
-    assert "配置" in result["message"]
+    assert response.status_code == 200
+    assert client.get("/api/admin/overview").status_code == 200
 
 
-def test_tmdb_discover_supports_24_item_logical_pages():
-    class Response:
-        def __init__(self, page: int):
-            self.page = page
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            first = (self.page - 1) * 20
-            return {
-                "total_results": 240,
-                "results": [
-                    {
-                        "id": first + index,
-                        "title": f"电影 {first + index}",
-                        "release_date": f"2026-08-{max(1, 31 - index):02d}",
-                        "popularity": index,
-                    }
-                    for index in range(20)
-                ],
-            }
-
-    class Client:
-        def __init__(self):
-            self.pages = []
-
-        async def get(self, _url, params):
-            self.pages.append(params["page"])
-            assert params["sort_by"] == "primary_release_date.desc"
-            assert "primary_release_date.lte" in params
-            assert params["vote_count.gte"] == 10
-            assert params["primary_release_date.gte"] == "2025-01-01"
-            assert params["primary_release_date.lte"] == "2025-12-31"
-            assert params["primary_release_year"] == 2025
-            assert "region" not in params
-            assert params["with_genres"] == 28
-            assert params["with_origin_country"] == "CN"
-            return Response(params["page"])
-
-    client = Client()
-    result = asyncio.run(_discover_tmdb_media(
-        client, "movie", api_key="key", language="zh-CN", region="CN",
-        page=2, page_size=RANKING_PAGE_SIZE, year=2025, genre="action", country="CN",
-    ))
-    assert client.pages == [2, 3]
-    assert len(result["items"]) == 24
-    assert all(item["media_type"] == "movie" for item in result["items"])
-    assert result["total_pages"] == 10
+def test_constant_time_comparison_accepts_chinese_credentials(web_client) -> None:
+    _, main = web_client
+    assert main._safe_equal("请改成一个强密码", "请改成一个强密码") is True
+    assert main._safe_equal("请改成一个强密码", "另一个密码") is False
 
 
-def test_home_ranking_is_paginated_and_has_no_date_limit():
-    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "每页 24 部" in javascript
-    assert "data-ranking-page" in javascript
-    assert 'id="rankingFilters"' in javascript
-    assert "国家/地区" in javascript
-    assert "全量内容，不限制日期" in javascript
-    assert "tmdb_ranking_window" not in javascript
-    assert 'if (!state.overview)' in javascript
+def test_static_page_has_guest_copy_and_no_public_directory(web_client) -> None:
+    client, _ = web_client
+    html = client.get("/").text
+    assert "复制链接" in html
+    assert "公开目录" not in html
+    assert "OpenList" not in html
 
 
-def test_guest_search_result_does_not_expose_transferable_link():
-    item = {
-        "title": "庆余年",
-        "url": "https://pan.baidu.com/s/private-share",
-        "validation_reason": "分享页面可以正常访问",
-        "provider": "baidu",
-    }
-    guest_view = main_module.resource_for_viewer(item, is_admin=False)
-    assert guest_view == {"title": "庆余年", "provider": "baidu"}
-    assert main_module.resource_for_viewer(item, is_admin=True) == item
-
-
-def test_resource_visibility_requires_recognition_and_validation(tmp_path: Path):
-    local_store = JobStore(tmp_path / "feihai.db")
-    local_store.initialize()
-    record = local_store.upsert_resource({
-        "fingerprint": "abc", "provider": "115", "url": "https://115.com/s/abc",
-        "title": "庆余年 S02E36", "normalized_title": "庆余年", "source": "test",
-        "season": 2, "episode": 36, "quality": "4K", "recognition_state": "recognized",
-    })
-    assert local_store.list_resources() == []
-    local_store.update_resource_validation(
-        record["fingerprint"], state="valid", reason="分享页面可以正常访问",
-        checked_at="2026-08-08T00:00:00+00:00", recheck_after="2026-08-08T02:00:00+00:00",
-    )
-    assert local_store.list_resources()[0]["normalized_title"] == "庆余年"
-
-
-def test_auth_session_does_not_expose_secret_key(tmp_path: Path):
-    local_store = JobStore(tmp_path / "feihai.db")
-    local_store.initialize()
-    session = local_store.create_auth_session(
-        session_id="session1", provider="115", method="qr", state="waiting",
-        public_payload={"qr_image_url": "https://example.com/qr"}, secret_key="private-key",
-    )
-    assert "secret_key" not in session
-    assert local_store.get_auth_session("session1", include_secret=True)["secret_key"] == "private-key"
-
-
-def test_generic_secrets_are_encrypted_at_rest(tmp_path: Path):
-    local_vault = CredentialVault(tmp_path)
-    local_vault.save_secret("tmdb_api_key", "top-secret")
-    assert local_vault.load_secret("tmdb_api_key") == "top-secret"
-    assert b"top-secret" not in (tmp_path / "credentials" / "tmdb_api_key.token").read_bytes()
-
-
-def test_115_empty_long_poll_payload_is_still_waiting():
-    assert parse_115_qr_state({"state": 1, "code": 0, "data": {}}) == ("waiting", "等待扫码")
-    assert parse_115_qr_state({"data": {"status": "1"}})[0] == "scanned"
-
-
-def test_settings_hide_internal_gateway_and_link_tmdb_guide():
-    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "OpenList 地址" not in javascript
-    assert 'id="openlistForm"' not in javascript
-    assert "https://www.themoviedb.org/settings/api" in javascript
-    assert "填写教程" in javascript
-    assert 'id="pansouForm"' in javascript
-    assert 'id="checkerForm"' in javascript
-    assert "/api/v1/links/check" in javascript
-
-
-def test_unavailable_provider_login_has_honest_in_page_guidance():
-    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "授权说明" in javascript
-    assert "夸克网页版可以扫码" in javascript
-    assert "中国移动开放平台面向申请接入的应用" in javascript
-    assert "Token、Cookie 与扫码凭证都只保存在本机" in javascript
-
-
-def test_all_four_providers_offer_local_encrypted_token_login():
-    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert 'data-token-auth="${x.name}"' in javascript
-    assert "Token、Cookie 与扫码凭证都只保存在本机" in javascript
-    assert "/credential" in javascript
-
-
-def test_compose_only_publishes_the_feihai_port():
+def test_compose_exposes_only_product_port() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert '"12366:12366"' in compose
-    assert '"5244:5244"' not in compose
-    assert '"8888:8888"' not in compose
-    assert "feihai-pansou" not in compose
-    assert "ghcr.io/fish2018/pansou" not in compose
+    assert "5244" not in compose
+    assert compose.count(":12366") == 1
 
 
-def test_compose_uses_fnos_native_mounts_without_openlist():
-    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
-    assert "FNOS_BAIDU_PATH" in compose
-    assert "FNOS_QUARK_PATH" in compose
-    assert "NATIVE_MOUNT_PROVIDERS" in compose
-    assert "openlistteam/openlist" not in compose.lower()
-    assert "feihai-gateway" not in compose
-
-
-def test_native_mount_directory_listing(tmp_path: Path, monkeypatch):
-    mount = tmp_path / "baidu"
-    (mount / "影视" / "电视剧").mkdir(parents=True)
-    (mount / "普通文件.txt").write_text("ignored", encoding="utf-8")
-    native_settings = replace(
-        settings,
-        native_mount_base=tmp_path,
-        native_mount_providers=("baidu",),
-    )
-    monkeypatch.setattr(main_module, "settings", native_settings)
-    assert main_module.native_mount_available("baidu") is True
-    root, current, directories = main_module.list_native_directories(
-        "baidu", "百度网盘", "/百度网盘"
-    )
-    assert root == current == "/百度网盘"
-    assert directories == [{"name": "影视", "path": "/百度网盘/影视", "modified": ""}]
+def test_frontend_has_only_one_delegated_click_handler() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert script.count("document.addEventListener('click'") == 1

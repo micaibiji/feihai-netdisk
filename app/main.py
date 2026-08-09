@@ -4,968 +4,612 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import mimetypes
-import os
-import secrets
 import time
 import uuid
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
-from .models import (CheckerSettingsRequest, DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
-                     PansouSettingsRequest,
-                     ProviderCredentialRequest, ResourceValidationRequest,
-                     PublicDirectoriesRequest, PublicDirectoryBrowseRequest,
-                     SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
-                     TmdbSettingsRequest)
-from .provider_auth import (ProviderAuthError, deserialize_secret,
-                            poll_115_qr, serialize_secret, start_115_qr)
-from .providers import PROVIDERS, ProviderRegistry
-from .services import (create_media_bundle, generate_strm, login_pansou, media_relative_path,
-                       provider_auth_start, search_resources, search_tmdb, send_notifications,
-                       test_pansou_connection, trending_tmdb)
-from .storage import JobStore
-from .validation import (ExternalValidatorError, should_show_resource,
-                         test_checker_connection, validate_share_urls)
+from .integrations import check_links, rankings, search_pansou, search_tmdb, send_telegram
+from .models import (
+    CreateFolderRequest,
+    CredentialRequest,
+    DirectoryRequest,
+    IntegrationSettingsRequest,
+    KeepTemporaryRequest,
+    LoginRequest,
+    PreparePlayRequest,
+    ProviderName,
+    ResourceInspectRequest,
+    SubscriptionRequest,
+    TransferRequest,
+)
+from .providers.auth import ProviderAuthError, poll_115_qr, start_115_qr
+from .providers.base import AuthenticationError, CapabilityError, CloudError, ShareFile
+from .providers.registry import ProviderRegistry
+from .storage import Store, utc_now
 from .vault import CredentialVault
 
+
 settings = get_settings()
-store = JobStore(settings.database_path)
+store = Store(settings.database_path)
 vault = CredentialVault(settings.data_dir)
-templates = Jinja2Templates(directory="app/templates")
-SESSION_COOKIE = "feihai_session"
-SESSION_MAX_AGE = 7 * 24 * 60 * 60
+STATIC_DIR = Path(__file__).parent / "static"
+SESSION_COOKIE = "feihai_admin"
+SESSION_SECONDS = 7 * 24 * 60 * 60
+_qr_sessions: dict[str, dict[str, Any]] = {}
+_inspect_cache: dict[str, tuple[float, Any]] = {}
+_play_rate: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _safe_equal(left: str, right: str) -> bool:
+    """Constant-time comparison that also supports Chinese credentials."""
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _integration_values() -> dict[str, str]:
+    saved = store.settings()
+    tmdb_key = vault.load("tmdb_api_key") or settings.tmdb_api_key
+    if tmdb_key.strip().lower() in {"change-me-now", "password", "your-api-key", "请填写"}:
+        tmdb_key = ""
+    return {
+        "pansou_url": str(saved.get("pansou_url") or settings.pansou_url),
+        "checker_url": str(saved.get("checker_url") or settings.checker_url),
+        "tmdb_api_key": tmdb_key,
+        "telegram_bot_token": vault.load("telegram_bot_token") or settings.telegram_bot_token,
+        "telegram_chat_id": vault.load("telegram_chat_id") or settings.telegram_chat_id,
+        "pansou_token": vault.load("pansou_token"),
+        "checker_token": vault.load("checker_token"),
+    }
+
+
+def _session_token(username: str) -> str:
+    expires = int(time.time()) + SESSION_SECONDS
+    payload = f"{username}:{expires}"
+    key = hashlib.sha256(settings.admin_password.encode()).digest()
+    signature = hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode()).decode().rstrip("=")
+
+
+def _session_user(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        username, expires, signature = decoded.rsplit(":", 2)
+        payload = f"{username}:{expires}"
+        key = hashlib.sha256(settings.admin_password.encode()).digest()
+        expected = hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected) or int(expires) < int(time.time()):
+            return None
+        if not _safe_equal(username, settings.admin_username):
+            return None
+        return username
+    except (ValueError, UnicodeError):
+        return None
+
+
+def require_admin(request: Request) -> str:
+    user = _session_user(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录管理员账号")
+    return user
+
+
+def _adapter(provider: str):
+    return ProviderRegistry.create(provider, vault.load(f"provider_{provider}"))
+
+
+def _cloud_error(error: Exception) -> HTTPException:
+    if isinstance(error, AuthenticationError):
+        return HTTPException(status_code=401, detail=str(error))
+    if isinstance(error, CapabilityError):
+        return HTTPException(status_code=409, detail=str(error))
+    if isinstance(error, CloudError):
+        return HTTPException(status_code=422, detail=str(error))
+    return HTTPException(status_code=500, detail="操作失败，请查看任务记录")
+
+
+async def _cleanup_expired() -> None:
+    await asyncio.sleep(5)
+    while True:
+        for item in store.expired_temps(utc_now()):
+            try:
+                adapter = _adapter(item["provider"])
+                await adapter.delete([item["cloud_file_id"]], [item["direct_hint"].get("path", "")])
+                store.set_temp_state(item["id"], "deleted")
+                store.add_history("temp_cleanup", item["provider"], f"已清理 {item['file_name']}")
+            except Exception as error:
+                store.set_temp_state(item["id"], "cleanup_failed")
+                store.add_history("temp_cleanup_failed", item["provider"], str(error)[:300])
+        await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.strm_dir.mkdir(parents=True, exist_ok=True)
     store.initialize()
     vault.initialize()
-    worker = asyncio.create_task(subscription_worker())
+    cleanup = asyncio.create_task(_cleanup_expired())
     try:
         yield
     finally:
-        worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+        cleanup.cancel()
+        await asyncio.gather(cleanup, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.7", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-async def subscription_worker() -> None:
-    await asyncio.sleep(15)
-    while True:
-        for subscription in store.list_subscriptions():
-            if not subscription["enabled"]:
-                continue
-            try:
-                results = await search_from_pansou(subscription["keyword"])
-                checks = await check_external_links([item["url"] for item in results[:30]])
-                new_count = 0
-                for item in results[:30]:
-                    record = store.upsert_resource(item)
-                    validation = checks[item["url"]]
-                    store.update_resource_validation(
-                        record["fingerprint"], state=validation.state, reason=validation.reason,
-                        checked_at=validation.checked_at, recheck_after=validation.recheck_after,
-                    )
-                    if not should_show_resource(validation.state):
-                        continue
-                    item["risk_status"] = "normal" if validation.state == "valid" else "unknown"
-                    selected = store.add_subscription_source(subscription["id"], item, settings.provider_priority)
-                    if store.mark_seen(subscription["id"], item["fingerprint"]):
-                        new_count += 1
-                        store.create(kind="subscription_match", provider=item["provider"], title=subscription["keyword"], status=JobStatus.QUEUED.value, detail={"share_url": item["url"], "selected": selected["share_url"] == item["url"], "message": f"发现 {item['provider_label']} 更新至 S{item['season']:02d}E{item['episode']:02d}"})
-                if new_count:
-                    await send_notifications(settings, f"飞海网盘：{subscription['keyword']} 发现 {new_count} 个新来源，已自动选择最新来源。")
-            except Exception as error:
-                store.add_risk_event("system", "warning", "subscription_check", f"{subscription['keyword']} 检查失败：{str(error)[:160]}", "保留原来源，等待下次重试")
-            finally:
-                store.mark_checked(subscription["id"])
-        await asyncio.sleep(settings.subscription_interval_seconds)
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
-def create_session_token(username: str, now: int | None = None) -> str:
-    expires_at = (now or int(time.time())) + SESSION_MAX_AGE
-    payload = f"{username}:{expires_at}"
-    key = hashlib.sha256(settings.admin_password.encode("utf-8")).digest()
-    signature = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("ascii").rstrip("=")
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "name": settings.app_name,
+        "version": "1.0.2",
+        "port_policy": "single-port",
+        "temp_retention_hours": settings.temp_retention_hours,
+    }
 
 
-def validate_session_token(token: str | None, now: int | None = None) -> str | None:
-    if not token:
-        return None
-    try:
-        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
-        username, expires_at_raw, signature = decoded.rsplit(":", 2)
-        payload = f"{username}:{expires_at_raw}"
-        key = hashlib.sha256(settings.admin_password.encode("utf-8")).digest()
-        expected = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            return None
-        if int(expires_at_raw) < (now or int(time.time())):
-            return None
-        if not secrets.compare_digest(username, settings.admin_username):
-            return None
-        return username
-    except (ValueError, UnicodeDecodeError):
-        return None
+@app.get("/api/session")
+def session(request: Request) -> dict[str, Any]:
+    user = _session_user(request.cookies.get(SESSION_COOKIE))
+    return {"is_admin": bool(user), "username": user or "访客"}
 
 
-def require_login(request: Request) -> str:
-    username = validate_session_token(request.cookies.get(SESSION_COOKIE))
-    if not username:
-        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
-    return username
-
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    if validate_session_token(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(request=request, name="login.html", context={"app_name": settings.app_name, "error": ""})
-
-
-@app.post("/login", response_class=HTMLResponse)
-def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    valid_user = secrets.compare_digest(username, settings.admin_username)
-    valid_password = secrets.compare_digest(password, settings.admin_password)
-    if not (valid_user and valid_password):
-        return templates.TemplateResponse(request=request, name="login.html", context={"app_name": settings.app_name, "error": "账号或密码不正确"}, status_code=401)
-    response = RedirectResponse("/?verified=1", status_code=303)
-    response.set_cookie(SESSION_COOKIE, create_session_token(username), max_age=SESSION_MAX_AGE, httponly=True, samesite="lax", secure=False, path="/")
+@app.post("/api/login")
+def login(payload: LoginRequest) -> JSONResponse:
+    if not (
+        _safe_equal(payload.username, settings.admin_username)
+        and _safe_equal(payload.password, settings.admin_password)
+    ):
+        raise HTTPException(status_code=401, detail="管理员账号或密码不正确")
+    response = JSONResponse({"ok": True, "username": payload.username})
+    response.set_cookie(
+        SESSION_COOKIE,
+        _session_token(payload.username),
+        max_age=SESSION_SECONDS,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
     return response
 
 
-@app.post("/logout")
-def logout():
-    response = RedirectResponse("/", status_code=303)
+@app.post("/api/logout")
+def logout() -> JSONResponse:
+    response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
-    is_admin = bool(validate_session_token(request.cookies.get(SESSION_COOKIE)))
-    return templates.TemplateResponse(request=request, name="index.html",
-                                      context={"app_name": settings.app_name, "is_admin": is_admin})
-
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.7", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
-
-
-@app.post("/api/verify-password")
-async def verify_password(request: Request, _: str = Depends(require_login)):
+@app.get("/api/rankings")
+async def ranking_endpoint(
+    media_type: str = Query("all", pattern=r"^(all|movie|tv)$"),
+    page: int = Query(1, ge=1, le=500),
+    year: int | None = Query(None, ge=1900, le=2200),
+    genre: str = Query("", max_length=30),
+    country: str = Query("", max_length=10),
+) -> dict[str, Any]:
     try:
-        payload = await request.json()
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail="请输入验证密码") from error
-    password = str(payload.get("password", ""))
-    if not secrets.compare_digest(password, settings.admin_password):
-        raise HTTPException(status_code=401, detail="验证密码不正确")
-    return {"verified": True}
-
-
-@app.get("/api/overview")
-async def overview(_: str = Depends(require_login)):
-    ranking = await current_trending()
-    subscriptions = store.list_subscriptions()
-    accounts = provider_states()
-    jobs = store.list(20)
-    ui_settings = store.load_settings()
-    current_tmdb = tmdb_config()
-    ui_settings.update({"tmdb_configured": bool(current_tmdb["api_key"]),
-                        "tmdb_language": current_tmdb["language"],
-                        "tmdb_region": current_tmdb["region"],
-                        "native_mounts": native_mount_status(),
-                        **integration_public_settings()})
-    return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
-            "risk_events": store.list_risk_events(8), "settings": ui_settings,
-            "public_directories": public_directory_entries()}
-
-
-@app.get("/api/public/session")
-def public_session(request: Request):
-    username = validate_session_token(request.cookies.get(SESSION_COOKIE))
-    return {"authenticated": bool(username), "username": username or ""}
-
-
-@app.get("/api/public/overview")
-async def public_overview():
-    return {"ranking": await current_trending(), "public_directories": public_directory_entries()}
-
-
-def provider_states() -> list[dict]:
-    records = {item["provider"]: item for item in store.provider_accounts()}
-    output = []
-    for provider in PROVIDERS:
-        item = records[provider.name.value]
-        environment_ready = bool(os.getenv(provider.credential_env, "").strip())
-        native_ready = native_mount_available(provider.name.value)
-        connected = (native_ready or environment_ready or vault.configured(provider.name.value)
-                     or item["state"] == "connected")
-        available_methods = list(provider.auth_methods)
-        # Gateway driver setup is not presented as an in-page login until its QR/password
-        # exchange can be completed and confirmed through this application.
-        for unfinished in ("gateway_qr", "gateway_password"):
-            if unfinished in available_methods:
-                available_methods.remove(unfinished)
-        if "oauth" in available_methods and not (settings.baidu_client_id and settings.baidu_redirect_uri):
-            available_methods.remove("oauth")
-        auth_method = "fnos_mount" if native_ready else item["auth_method"]
-        account_mask = "飞牛原生挂载" if native_ready else item["account_mask"]
-        output.append({**item, "name": provider.name.value, "label": provider.label,
-                       "configured": connected, "state": "connected" if connected else item["state"],
-                       "auth_method": auth_method, "account_mask": account_mask,
-                       "native_mount": native_ready,
-                       "auth_methods": available_methods,
-                       "setup_required": not available_methods})
-    return output
-
-
-def native_mount_available(provider: str) -> bool:
-    if not settings.native_mount_enabled(provider):
-        return False
-    root = settings.native_mount_path(provider)
-    try:
-        return root.is_dir() and os.access(root, os.R_OK | os.X_OK)
-    except OSError:
-        return False
-
-
-def native_mount_status() -> dict[str, bool]:
-    return {provider.name.value: native_mount_available(provider.name.value)
-            for provider in PROVIDERS}
-
-
-def list_native_directories(provider: str, label: str, requested: str) -> tuple[str, str, list[dict]]:
-    virtual_root = f"/{label}"
-    virtual_path = requested or virtual_root
-    if virtual_path == "/":
-        virtual_path = virtual_root
-    if virtual_path != virtual_root and not virtual_path.startswith(virtual_root + "/"):
-        raise HTTPException(400, "目标目录必须位于当前网盘挂载点内")
-
-    suffix = virtual_path[len(virtual_root):].lstrip("/")
-    relative = PurePosixPath(suffix) if suffix else PurePosixPath()
-    if any(part in {"", ".", ".."} for part in relative.parts):
-        raise HTTPException(400, "目标目录格式不正确")
-
-    root = settings.native_mount_path(provider).resolve()
-    target = (root / Path(*relative.parts)).resolve()
-    if target != root and root not in target.parents:
-        raise HTTPException(400, "目标目录超出当前网盘挂载点")
-    try:
-        entries = sorted(
-            (entry for entry in os.scandir(target) if entry.is_dir(follow_symlinks=False)),
-            key=lambda entry: entry.name.casefold(),
-        )
-    except FileNotFoundError as error:
-        raise HTTPException(404, "目标目录不存在或网盘已经断开") from error
-    except (PermissionError, OSError) as error:
-        raise HTTPException(502, "飞牛远程挂载暂时无法读取，请检查网盘连接状态") from error
-    directories = [
-        {"name": entry.name,
-         "path": f"{virtual_path.rstrip('/')}/{entry.name}",
-         "modified": ""}
-        for entry in entries
-    ]
-    return virtual_root, virtual_path, directories
-
-
-def provider_label(provider: str) -> str:
-    match = next((item.label for item in PROVIDERS if item.name.value == provider), None)
-    if not match:
-        raise HTTPException(404, "未知网盘")
-    return match
-
-
-def public_directory_id(provider: str, path: str) -> str:
-    return hashlib.sha256(f"{provider}:{path}".encode("utf-8")).hexdigest()[:16]
-
-
-def public_directory_entries() -> list[dict]:
-    raw = store.load_settings().get("public_directories", [])
-    if not isinstance(raw, list):
-        return []
-    output = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        provider = str(item.get("provider", ""))
-        path = str(item.get("path", ""))
-        if provider not in {entry.name.value for entry in PROVIDERS} or not path:
-            continue
-        output.append({
-            "id": public_directory_id(provider, path),
-            "provider": provider,
-            "provider_label": provider_label(provider),
-            "path": path,
-            "label": str(item.get("label") or PurePosixPath(path).name or provider_label(provider)),
-        })
-    return output
-
-
-def list_public_directory_contents(entry: dict, relative_path: str) -> dict:
-    provider = entry["provider"]
-    label = provider_label(provider)
-    base_virtual = entry["path"]
-    relative = PurePosixPath(relative_path) if relative_path else PurePosixPath()
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-        raise HTTPException(400, "目录格式不正确")
-    requested = base_virtual.rstrip("/")
-    if relative.parts:
-        requested += "/" + "/".join(relative.parts)
-
-    virtual_root = f"/{label}"
-    if base_virtual != virtual_root and not base_virtual.startswith(virtual_root + "/"):
-        raise HTTPException(400, "公开目录配置无效")
-    suffix = requested[len(virtual_root):].lstrip("/")
-    mount_root = settings.native_mount_path(provider).resolve()
-    target = (mount_root / Path(*PurePosixPath(suffix).parts)).resolve()
-    base_suffix = base_virtual[len(virtual_root):].lstrip("/")
-    base_target = (mount_root / Path(*PurePosixPath(base_suffix).parts)).resolve()
-    if target != base_target and base_target not in target.parents:
-        raise HTTPException(400, "不能访问公开目录之外的内容")
-    if target != mount_root and mount_root not in target.parents:
-        raise HTTPException(400, "目录超出网盘挂载范围")
-    try:
-        scanned = [item for item in os.scandir(target) if not item.is_symlink()]
-        scanned.sort(key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.casefold()))
-        contents = []
-        for item in scanned:
-            is_directory = item.is_dir(follow_symlinks=False)
-            stat = item.stat(follow_symlinks=False)
-            item_relative = "/".join((*relative.parts, item.name))
-            contents.append({
-                "name": item.name,
-                "type": "directory" if is_directory else "file",
-                "path": item_relative,
-                "size": 0 if is_directory else stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-            })
-    except FileNotFoundError as error:
-        raise HTTPException(404, "公开目录不存在或网盘已经断开") from error
-    except (PermissionError, OSError) as error:
-        raise HTTPException(502, "飞牛远程挂载暂时无法读取") from error
-    return {
-        "id": entry["id"], "label": entry["label"], "provider": provider,
-        "provider_label": entry["provider_label"], "path": "/".join(relative.parts),
-        "contents": contents,
-    }
-
-
-def resolve_public_file(entry: dict, relative_path: str) -> Path:
-    relative = PurePosixPath(relative_path)
-    if not relative.parts or relative.is_absolute() or any(
-            part in {"", ".", ".."} for part in relative.parts):
-        raise HTTPException(400, "文件路径格式不正确")
-    provider = entry["provider"]
-    label = provider_label(provider)
-    virtual_root = f"/{label}"
-    base_virtual = entry["path"]
-    base_suffix = base_virtual[len(virtual_root):].lstrip("/")
-    mount_root = settings.native_mount_path(provider).resolve()
-    base_target = (mount_root / Path(*PurePosixPath(base_suffix).parts)).resolve()
-    candidate = base_target / Path(*relative.parts)
-    target = candidate.resolve()
-    if target != base_target and base_target not in target.parents:
-        raise HTTPException(400, "不能访问公开目录之外的文件")
-    if candidate.is_symlink() or not target.is_file():
-        raise HTTPException(404, "视频文件不存在")
-    return target
-
-
-def tmdb_config() -> dict[str, str]:
-    stored = store.load_settings()
-    return {
-        "api_key": vault.load_secret("tmdb_api_key") or settings.tmdb_api_key,
-        "language": str(stored.get("tmdb_language") or "zh-CN"),
-        "region": str(stored.get("tmdb_region") or "CN"),
-    }
-
-
-def pansou_config() -> dict[str, str | bool]:
-    stored = store.load_settings()
-    # External integrations are configured explicitly from the web UI.
-    base_url = str(stored.get("pansou_base_url") or "").rstrip("/")
-    username = vault.load_secret("pansou_username")
-    password = vault.load_secret("pansou_password")
-    token = vault.load_secret("pansou_token")
-    return {
-        "base_url": base_url,
-        "api_path": str(stored.get("pansou_api_path") or "/api/search"),
-        "source": str(stored.get("pansou_source") or "all"),
-        "username": username,
-        "password": password,
-        "token": token,
-        "configured": bool(base_url),
-        "auth_configured": bool(token or (username and password)),
-    }
-
-
-def checker_config() -> dict[str, str | int | bool]:
-    stored = store.load_settings()
-    base_url = str(stored.get("checker_base_url") or "").rstrip("/")
-    token = vault.load_secret("checker_token")
-    return {
-        "base_url": base_url,
-        "api_path": str(stored.get("checker_api_path") or "/api/v1/links/check"),
-        "token": token,
-        "timeout_seconds": int(stored.get("checker_timeout_seconds") or 35),
-        "cache_minutes": int(stored.get("checker_cache_minutes") or 120),
-        "configured": bool(base_url),
-        "auth_configured": bool(token),
-    }
-
-
-def integration_public_settings() -> dict[str, object]:
-    pansou = pansou_config()
-    checker = checker_config()
-    return {
-        "pansou_base_url": pansou["base_url"],
-        "pansou_api_path": pansou["api_path"],
-        "pansou_source": pansou["source"],
-        "pansou_configured": pansou["configured"],
-        "pansou_auth_configured": pansou["auth_configured"],
-        "checker_base_url": checker["base_url"],
-        "checker_api_path": checker["api_path"],
-        "checker_timeout_seconds": checker["timeout_seconds"],
-        "checker_cache_minutes": checker["cache_minutes"],
-        "checker_configured": checker["configured"],
-        "checker_auth_configured": checker["auth_configured"],
-    }
-
-
-async def search_from_pansou(query: str) -> list[dict]:
-    config = pansou_config()
-    try:
-        return await search_resources(
-            settings, query, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
-            source=str(config["source"]), token=str(config["token"]),
-        )
-    except httpx.HTTPStatusError as error:
-        if error.response.status_code != 401 or not (config["username"] and config["password"]):
-            raise
-        token = await login_pansou(str(config["base_url"]), str(config["username"]), str(config["password"]))
-        vault.save_secret("pansou_token", token)
-        return await search_resources(
-            settings, query, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
-            source=str(config["source"]), token=token,
-        )
-
-
-async def check_external_links(urls: list[str]):
-    config = checker_config()
-    return await validate_share_urls(
-        urls, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
-        token=str(config["token"]), timeout_seconds=int(config["timeout_seconds"]),
-        cache_minutes=int(config["cache_minutes"]),
-    )
-
-
-async def current_trending(media_type: str = "all", page: int = 1, year: int | None = None,
-                           genre: str | None = None, country: str | None = None) -> dict:
-    config = tmdb_config()
-    return await trending_tmdb(settings, media_type, api_key=config["api_key"],
-                               language=config["language"], region=config["region"],
-                               page=page, year=year, genre=genre, country=country)
-
-
-@app.get("/api/providers")
-def providers(_: str = Depends(require_login)):
-    return provider_states()
-
-
-@app.post("/api/providers/{provider}/auth/start")
-async def start_provider_auth(provider: str, _: str = Depends(require_login)):
-    if provider not in {item.name.value for item in PROVIDERS}:
-        raise HTTPException(404, "未知网盘")
-    session_id = uuid.uuid4().hex
-    try:
-        if provider == "115":
-            public, secret_payload = await start_115_qr()
-            secret_key = f"auth_{session_id}"
-            vault.save_secret(secret_key, serialize_secret(secret_payload))
-            result = store.create_auth_session(
-                session_id=session_id, provider=provider, method="qr", state="waiting",
-                public_payload=public, secret_key=secret_key,
-                expires_at=(datetime.now(UTC) + timedelta(minutes=3)).isoformat(),
-            )
-            store.update_provider(provider, state="authorizing", auth_method="qr")
-            return result
-        result = provider_auth_start(settings, provider)
-        if not result["ready"]:
-            raise HTTPException(409, result["message"])
-        session = store.create_auth_session(
-            session_id=session_id, provider=provider, method=result["mode"], state="waiting",
-            public_payload={"authorize_url": result["url"], "message": result["message"]},
-            expires_at=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
-        )
-        store.update_provider(provider, state="authorizing", auth_method=result["mode"])
-        return session
-    except ProviderAuthError as error:
-        raise HTTPException(502, str(error)) from error
-
-
-@app.get("/api/providers/auth/{session_id}")
-async def provider_auth_status(session_id: str, _: str = Depends(require_login)):
-    try:
-        session = store.get_auth_session(session_id, include_secret=True)
-    except KeyError as error:
-        raise HTTPException(404, "授权会话不存在") from error
-    if session["state"] in {"succeeded", "expired", "canceled", "failed"}:
-        session.pop("secret_key", None)
-        return session
-    if session["provider"] != "115" or session["method"] != "qr":
-        session.pop("secret_key", None)
-        return session
-    if session.get("expires_at") and datetime.fromisoformat(session["expires_at"]) < datetime.now(UTC):
-        return store.update_auth_session(session_id, state="expired", error="二维码已过期")
-    try:
-        secret = deserialize_secret(vault.load_secret(session["secret_key"]))
-        auth_state, message, credential = await poll_115_qr(secret)
-        public = {**session["public_payload"], "message": message}
-        output = store.update_auth_session(session_id, state=auth_state, public_payload=public)
-        if credential:
-            vault.save("115", credential)
-            vault.delete_secret(session["secret_key"])
-            store.update_provider("115", state="connected", account_mask="115 已授权账号",
-                                  risk_status="normal", auth_method="qr")
-        return output
-    except (ProviderAuthError, httpx.HTTPError) as error:
-        message = str(error).strip() or "115 状态服务暂时没有响应，请刷新二维码重试"
-        raise HTTPException(502, f"查询扫码状态失败：{message}") from error
-
-
-@app.post("/api/providers/{provider}/credential")
-def save_provider_credential(provider: str, payload: ProviderCredentialRequest, _: str = Depends(require_login)):
-    if provider not in {item.name.value for item in PROVIDERS}:
-        raise HTTPException(404, "未知网盘")
-    vault.save(provider, payload.credential)
-    return store.update_provider(provider, state="connected", account_mask=payload.account_mask,
-                                 risk_status="unknown", auth_method="token")
-
-
-@app.post("/api/providers/risk-scan")
-async def risk_scan(_: str = Depends(require_login)):
-    results = []
-    for item in provider_states():
-        if not item["configured"]:
-            level, state, message, action = "info", "unknown", "尚未授权，未执行访问检测", "完成授权后再检测"
-        elif item.get("native_mount") and not native_mount_available(item["name"]):
-            level, state, message, action = "warning", "mount_unavailable", "飞牛远程挂载无法访问", "请在文件管理中重新连接网盘"
-        elif item.get("native_mount"):
-            level, state, message, action = "safe", "normal", "飞牛远程挂载可读，连接正常", "保持低频访问"
-        else:
-            level, state, message, action = "safe", "normal", "凭证存在，未发现本地异常", "保持低频访问"
-        store.update_provider(item["name"], risk_status=state)
-        results.append(store.add_risk_event(item["name"], level, "credential_probe", message, action))
-    return results
-
-
-@app.get("/api/risk-events")
-def risk_events(_: str = Depends(require_login)):
-    return store.list_risk_events()
-
-
-@app.get("/api/jobs")
-def jobs(limit: int = Query(default=50, ge=1, le=200), _: str = Depends(require_login)):
-    return store.list(limit)
-
-
-@app.post("/api/intake", status_code=status.HTTP_201_CREATED)
-async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
-    try:
-        provider = ProviderRegistry.detect(str(payload.share_url))
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
-    configured = next(item["configured"] for item in provider_states() if item["name"] == provider.name.value)
-    if not configured:
-        return store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
-                            status=JobStatus.WAITING_AUTH.value,
-                            detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
-                                    "auto_organize": payload.auto_organize, "message": f"请先授权 {provider.label}"})
-    try:
-        validation = (await check_external_links([str(payload.share_url)]))[str(payload.share_url)]
-    except ExternalValidatorError:
-        validation = None
-    if validation is not None and not should_show_resource(validation.state):
-        raise HTTPException(409, f"入库前检测为失效：{validation.reason}")
-    validation_detail = validation.__dict__ if validation is not None else {
-        "state": "detector_unavailable", "reason": "检测网站暂时不可用",
-    }
-    validation_message = (
-        "检测网站确认有效，等待同网盘入库"
-        if validation is not None and validation.state == "valid"
-        else "未被检测网站判定为失效，已进入入库队列"
-    )
-    job = store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
-                       status=JobStatus.QUEUED.value,
-                       detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
-                               "auto_organize": payload.auto_organize, "validation": validation_detail,
-                               "message": validation_message})
-    store.add_operation(action="queue_intake", target_type="job", target_id=str(job["id"]),
-                        summary=f"{payload.title} → {provider.label}:{payload.target_folder}")
-    return job
-
-
-@app.get("/api/tmdb/trending")
-async def tmdb_trending(media_type: str = "all", page: int = Query(default=1, ge=1, le=500),
-                        year: int | None = Query(default=None, ge=1900, le=2200),
-                        genre: str | None = Query(default=None, pattern="^(action|animation|comedy|crime|documentary|drama|family|mystery|romance|scifi)$"),
-                        country: str | None = Query(default=None, pattern="^(CN|US|GB|JP|KR|HK|TW|IN|FR|DE)$")):
-    try:
-        return await current_trending(media_type, page, year, genre, country)
-    except Exception as error:
-        raise HTTPException(502, f"TMDB榜单查询失败：{error}") from error
-
-
-@app.get("/api/tmdb/search")
-async def tmdb_search(q: str = Query(min_length=1, max_length=100)):
-    try:
-        config = tmdb_config()
-        return await search_tmdb(settings, q, api_key=config["api_key"],
-                                 language=config["language"], region=config["region"])
-    except Exception as error:
-        raise HTTPException(502, f"TMDB查询失败：{error}") from error
-
-
-def resource_for_viewer(item: dict, is_admin: bool) -> dict:
-    """Do not send transferable share links to unauthenticated visitors."""
-    result = item.copy()
-    if not is_admin:
-        result.pop("url", None)
-        result.pop("validation_reason", None)
-    return result
+        return await rankings(_integration_values()["tmdb_api_key"], media_type, page, year, genre, country)
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"TMDB 暂时无法访问：{type(error).__name__}") from error
 
 
 @app.get("/api/search")
-async def resource_search(request: Request, q: str = Query(min_length=1, max_length=100)):
+async def search_endpoint(q: str = Query(min_length=1, max_length=200)) -> dict[str, Any]:
+    integration = _integration_values()
     try:
-        config = tmdb_config()
-        discovered, works = await asyncio.gather(
-            search_from_pansou(q),
-            search_tmdb(settings, q, api_key=config["api_key"], language=config["language"],
-                        region=config["region"]),
+        resources, media_result = await asyncio.gather(
+            search_pansou(integration["pansou_url"], q, integration["pansou_token"]),
+            search_tmdb(integration["tmdb_api_key"], q),
+            return_exceptions=True,
         )
-        records = {item["url"]: store.upsert_resource(item) for item in discovered[:100]}
-        try:
-            validations = await check_external_links(list(records))
-            detector = {"status": "connected", "message": "你的检测网站已完成检查"}
-        except ExternalValidatorError as error:
-            validations = {}
-            detector = {"status": "unavailable", "message": str(error)}
-
-        async def check(item: dict) -> tuple[dict, str]:
-            record = records[item["url"]]
-            validation = validations.get(item["url"])
-            if validation is None:
-                item["validation_state"] = "detector_unavailable"
-                item["validation_reason"] = "检测网站暂时不可用"
-                return item, "detector_unavailable"
-            store.update_resource_validation(
-                record["fingerprint"], state=validation.state, reason=validation.reason,
-                checked_at=validation.checked_at, recheck_after=validation.recheck_after,
-            )
-            item["validation_state"] = validation.state
-            item["validation_reason"] = validation.reason
-            return item, validation.state
-
-        checked = await asyncio.gather(*(check(item) for item in discovered[:100]))
-        is_admin = bool(validate_session_token(request.cookies.get(SESSION_COOKIE)))
-        visible = [resource_for_viewer(item, is_admin) for item, state in checked
-                   if should_show_resource(state)]
-        counts: dict[str, int] = {"discovered": len(discovered), "valid": 0, "invalid": 0,
-                                  "unverifiable": 0, "pending_recognition": 0,
-                                  "detector_unavailable": 0}
-        for _, validation_state in checked:
-            counts[validation_state] = counts.get(validation_state, 0) + 1
-        return {"works": works, "resources": visible, "progress": counts,
-                "detector": detector}
-    except Exception as error:
-        raise HTTPException(502, f"资源搜索失败：{error}") from error
-
-
-@app.post("/api/resources/validate")
-async def validate_resource(payload: ResourceValidationRequest, _: str = Depends(require_login)):
-    try:
-        result = (await check_external_links([str(payload.share_url)]))[str(payload.share_url)]
-    except (ValueError, ExternalValidatorError) as error:
-        raise HTTPException(503, str(error)) from error
-    return result.__dict__
-
-
-@app.get("/api/subscriptions")
-def subscriptions(_: str = Depends(require_login)):
-    return store.list_subscriptions()
-
-
-@app.post("/api/subscriptions", status_code=201)
-def create_subscription(payload: SubscriptionRequest, _: str = Depends(require_login)):
-    return store.create_subscription(payload.keyword, payload.auto_intake, payload.media_type, payload.year)
-
-
-@app.post("/api/subscriptions/{subscription_id}/sources", status_code=201)
-def add_subscription_source(subscription_id: int, payload: SubscriptionSourceRequest, _: str = Depends(require_login)):
-    try:
-        provider = ProviderRegistry.detect(str(payload.share_url))
-        item = {"provider": provider.name.value, "url": str(payload.share_url), "title": payload.title, "season": payload.season, "episode": payload.episode, "quality": payload.quality, "source": payload.source, "risk_status": "unknown"}
-        return store.add_subscription_source(subscription_id, item, settings.provider_priority)
-    except (ValueError, KeyError) as error:
-        raise HTTPException(400, str(error)) from error
-
-
-@app.patch("/api/subscriptions/{subscription_id}")
-def update_subscription(subscription_id: int, enabled: bool, _: str = Depends(require_login)):
-    store.set_subscription_enabled(subscription_id, enabled)
-    return {"updated": True}
-
-
-@app.post("/api/organize", status_code=201)
-def organize(title: str, media_type: str, play_url: str, year: int | None = None, season: int = 1, episode: int = 0, _: str = Depends(require_login)):
-    files = create_media_bundle(settings, title=title, media_type=media_type, play_url=play_url, year=year, season=season, episode=episode)
-    job = store.create(kind="organize", provider="selected", title=title, status=JobStatus.COMPLETED.value, detail={"files": files, "message": "已按统一命名生成 STRM 与 NFO，等待飞牛影视扫描"})
-    return {"files": files, "job": job}
-
-
-@app.get("/api/naming-preview")
-def naming_preview(title: str, media_type: str = "tv", year: int | None = None, season: int = 1, episode: int = 1, _: str = Depends(require_login)):
-    return {"path": media_relative_path(title, media_type, year, season, episode)}
-
-
-@app.post("/api/strm", status_code=201)
-def create_strm(payload: StrmRequest, _: str = Depends(require_login)):
-    target = generate_strm(settings, payload.relative_dir, payload.name, str(payload.play_url))
-    return {"created": True, "path": str(target.relative_to(settings.strm_dir))}
-
-
-@app.get("/api/settings")
-def get_app_settings(_: str = Depends(require_login)):
-    values = store.load_settings()
-    tmdb = tmdb_config()
-    values.update({"tmdb_configured": bool(tmdb["api_key"]), "tmdb_language": tmdb["language"],
-                   "tmdb_region": tmdb["region"],
-                   "native_mounts": native_mount_status(),
-                   **integration_public_settings()})
-    return values
-
-
-@app.put("/api/settings")
-def update_app_settings(payload: SettingsRequest, _: str = Depends(require_login)):
-    store.save_settings(payload.model_dump())
-    return {"saved": True, "settings": store.load_settings()}
-
-
-@app.get("/api/settings/public-directories")
-def get_public_directories(_: str = Depends(require_login)):
-    return {"entries": public_directory_entries()}
-
-
-@app.put("/api/settings/public-directories")
-def update_public_directories(payload: PublicDirectoriesRequest, _: str = Depends(require_login)):
-    normalized = []
-    seen = set()
-    for item in payload.entries:
-        provider = item.provider.value
-        if not native_mount_available(provider):
-            raise HTTPException(409, f"{provider_label(provider)}尚未在飞牛文件管理中挂载")
-        _, path, _ = list_native_directories(provider, provider_label(provider), item.path)
-        key = (provider, path)
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append({"provider": provider, "path": path,
-                           "label": item.label.strip() or PurePosixPath(path).name})
-    store.save_settings({"public_directories": normalized})
-    return {"saved": True, "entries": public_directory_entries()}
-
-
-@app.post("/api/public/directories/{directory_id}/browse")
-def browse_public_directory(directory_id: str, payload: PublicDirectoryBrowseRequest):
-    entry = next((item for item in public_directory_entries() if item["id"] == directory_id), None)
-    if not entry:
-        raise HTTPException(404, "公开目录不存在或已经取消公开")
-    if not native_mount_available(entry["provider"]):
-        raise HTTPException(503, "网盘暂时未连接")
-    return list_public_directory_contents(entry, payload.path)
-
-
-@app.get("/api/public/directories/{directory_id}/stream")
-def stream_public_video(directory_id: str, path: str = Query(min_length=1, max_length=1000)):
-    entry = next((item for item in public_directory_entries() if item["id"] == directory_id), None)
-    if not entry:
-        raise HTTPException(404, "公开目录不存在或已经取消公开")
-    if not native_mount_available(entry["provider"]):
-        raise HTTPException(503, "网盘暂时未连接")
-    target = resolve_public_file(entry, path)
-    allowed = {".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ts", ".m2ts"}
-    if target.suffix.lower() not in allowed:
-        raise HTTPException(415, "该文件不支持在线播放")
-    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    return FileResponse(target, media_type=media_type, filename=target.name,
-                        content_disposition_type="inline",
-                        headers={"Cache-Control": "private, no-store",
-                                 "X-Content-Type-Options": "nosniff"})
-
-
-@app.get("/api/settings/integrations")
-def get_integration_settings(_: str = Depends(require_login)):
-    return integration_public_settings()
-
-
-async def _resolve_pansou_token(base_url: str, username: str, password: str, token: str) -> str:
-    if token:
-        return token
-    if username and password:
-        return await login_pansou(base_url, username, password)
-    return ""
-
-
-@app.put("/api/settings/pansou")
-async def update_pansou_settings(payload: PansouSettingsRequest, _: str = Depends(require_login)):
-    current = pansou_config()
-    if payload.clear_credentials:
-        for key in ("pansou_username", "pansou_password", "pansou_token"):
-            vault.delete_secret(key)
-        current.update({"username": "", "password": "", "token": ""})
-    username = payload.username or str(current["username"])
-    password = payload.password or str(current["password"])
-    token = payload.token or str(current["token"])
-    try:
-        token = await _resolve_pansou_token(payload.base_url.rstrip("/"), username, password, token)
-        test = await test_pansou_connection(payload.base_url, token)
-    except (httpx.HTTPError, ValueError) as error:
-        raise HTTPException(400, f"Pansou 连接测试失败：{str(error)}") from error
-    if payload.username:
-        vault.save_secret("pansou_username", payload.username)
-    if payload.password:
-        vault.save_secret("pansou_password", payload.password)
-    if token:
-        vault.save_secret("pansou_token", token)
-    store.save_settings({
-        "pansou_base_url": payload.base_url.rstrip("/"),
-        "pansou_api_path": payload.api_path,
-        "pansou_source": payload.source,
-    })
-    return {"saved": True, "test": test, "settings": integration_public_settings()}
-
-
-@app.post("/api/settings/pansou/test")
-async def test_pansou(_: str = Depends(require_login)):
-    config = pansou_config()
-    if not config["configured"]:
-        raise HTTPException(409, "尚未配置 Pansou 地址")
-    try:
-        token = await _resolve_pansou_token(
-            str(config["base_url"]), str(config["username"]),
-            str(config["password"]), str(config["token"]),
-        )
-        if token and token != config["token"]:
-            vault.save_secret("pansou_token", token)
-        return await test_pansou_connection(str(config["base_url"]), token)
-    except (httpx.HTTPError, ValueError) as error:
-        raise HTTPException(502, f"Pansou 连接失败：{str(error)}") from error
-
-
-@app.put("/api/settings/checker")
-async def update_checker_settings(payload: CheckerSettingsRequest, _: str = Depends(require_login)):
-    if payload.clear_token:
-        vault.delete_secret("checker_token")
-    token = payload.token or ("" if payload.clear_token else vault.load_secret("checker_token"))
-    try:
-        test = await test_checker_connection(payload.base_url, token)
-    except ExternalValidatorError as error:
-        raise HTTPException(400, f"检测网站连接测试失败：{str(error)}") from error
-    if payload.token:
-        vault.save_secret("checker_token", payload.token)
-    store.save_settings({
-        "checker_base_url": payload.base_url.rstrip("/"),
-        "checker_api_path": payload.api_path,
-        "checker_timeout_seconds": payload.timeout_seconds,
-        "checker_cache_minutes": payload.cache_minutes,
-    })
-    return {"saved": True, "test": test, "settings": integration_public_settings()}
-
-
-@app.post("/api/settings/checker/test")
-async def test_checker(_: str = Depends(require_login)):
-    config = checker_config()
-    if not config["configured"]:
-        raise HTTPException(409, "尚未配置检测网站地址")
-    try:
-        return await test_checker_connection(str(config["base_url"]), str(config["token"]))
-    except ExternalValidatorError as error:
-        raise HTTPException(502, str(error)) from error
-
-
-@app.get("/api/settings/tmdb")
-def get_tmdb_settings(_: str = Depends(require_login)):
-    config = tmdb_config()
-    return {"configured": bool(config["api_key"]), "api_key_mask": "••••••••" if config["api_key"] else "",
-            "language": config["language"], "region": config["region"]}
-
-
-@app.put("/api/settings/tmdb")
-async def update_tmdb_settings(payload: TmdbSettingsRequest, _: str = Depends(require_login)):
-    if payload.api_key:
-        try:
-            await trending_tmdb(settings, "movie", api_key=payload.api_key, language=payload.language,
-                                region=payload.region)
-        except httpx.HTTPError as error:
-            raise HTTPException(400, "TMDB 密钥测试失败，请检查密钥和网络") from error
-        vault.save_secret("tmdb_api_key", payload.api_key)
-    elif not vault.load_secret("tmdb_api_key") and not settings.tmdb_api_key:
-        raise HTTPException(400, "请输入 TMDB API 密钥")
-    store.save_settings({"tmdb_language": payload.language, "tmdb_region": payload.region})
-    return {"saved": True, "test": "connected", "settings": get_tmdb_settings(_)}
-
-
-@app.post("/api/settings/tmdb/test")
-async def test_tmdb(_: str = Depends(require_login)):
-    try:
-        ranking = await current_trending("movie")
-    except httpx.HTTPError as error:
-        raise HTTPException(502, "TMDB 连接测试失败") from error
-    if not ranking["live"]:
-        raise HTTPException(409, "尚未配置 TMDB API 密钥")
-    return {"connected": True, "updated_at": ranking["updated_at"], "items": len(ranking["items"])}
-
-
-@app.post("/api/providers/{provider}/directories")
-async def provider_directories(provider: str, payload: DirectoryRequest, _: str = Depends(require_login)):
-    if provider not in {item.name.value for item in PROVIDERS}:
-        raise HTTPException(404, "未知网盘")
-    account = next(item for item in provider_states() if item["name"] == provider)
-    if not account["configured"]:
-        raise HTTPException(409, f"请先授权 {account['label']}")
-    if not native_mount_available(provider):
-        raise HTTPException(503, "飞牛远程挂载尚未接入，请先在飞牛文件管理中挂载网盘")
-    mount_root, requested, directories = list_native_directories(
-        provider, account["label"], payload.path or ""
+    except (ValueError, httpx.HTTPError) as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    if isinstance(resources, Exception):
+        raise HTTPException(status_code=502, detail=str(resources))
+    media = [] if isinstance(media_result, Exception) else media_result
+    checked = await check_links(
+        integration["checker_url"],
+        [item["url"] for item in resources],
+        integration["checker_token"],
     )
-    return {"provider": provider, "root": mount_root, "path": requested,
-            "directories": directories, "connection": "fnos_mount"}
+    visible = []
+    best_media = media[0] if media else None
+    for item in resources:
+        state = checked.get(item["url"], {"state": "unverifiable", "reason": "保留显示"})
+        if state["state"] == "invalid":
+            continue
+        item["validation_state"] = state["state"]
+        item["validation_reason"] = state["reason"]
+        item["poster"] = best_media.get("poster", "") if best_media else ""
+        item["overview"] = best_media.get("overview", "暂无简介") if best_media else "暂无简介"
+        item["media"] = best_media
+        visible.append(item)
+    return {
+        "query": q,
+        "media": media,
+        "resources": visible,
+        "found": len(resources),
+        "hidden_invalid": len(resources) - len(visible),
+        "rule": "仅隐藏检测网站明确判定失效的链接",
+    }
 
 
-@app.post("/api/notify")
-async def notify(payload: NotifyRequest, _: str = Depends(require_login)):
+async def _inspect(payload: ResourceInspectRequest):
+    url = str(payload.share_url)
+    cache_key = hashlib.sha256(f"{payload.provider}:{url}:{payload.extraction_code}".encode()).hexdigest()
+    cached = _inspect_cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    adapter = _adapter(payload.provider.value)
+    inspection = await adapter.inspect_share(url, payload.extraction_code)
+    _inspect_cache[cache_key] = (time.time() + 300, inspection)
+    return inspection
+
+
+@app.post("/api/resources/inspect")
+async def inspect_resource(payload: ResourceInspectRequest) -> dict[str, Any]:
     try:
-        delivered = await send_notifications(settings, payload.message)
+        inspection = await _inspect(payload)
+        return inspection.public()
     except Exception as error:
-        raise HTTPException(502, f"通知发送失败：{error}") from error
-    return {"delivered": delivered, "configured": bool(delivered)}
+        raise _cloud_error(error) from error
+
+
+def _limit_play(request: Request) -> None:
+    key = request.client.host if request.client else "local"
+    bucket = _play_rate[key]
+    cutoff = time.time() - 600
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= 8:
+        raise HTTPException(status_code=429, detail="临时播放准备过于频繁，请十分钟后再试")
+    bucket.append(time.time())
+
+
+def _file_hint(file: ShareFile, source_file_id: str = "") -> dict[str, Any]:
+    return {
+        "id": file.id,
+        "name": file.name,
+        "parent_id": file.parent_id,
+        "mime_type": file.mime_type,
+        "pick_code": file.pick_code,
+        "path": file.path,
+        "source_file_id": source_file_id,
+    }
+
+
+def _temp_file(item: dict[str, Any]) -> ShareFile:
+    hint = item["direct_hint"]
+    return ShareFile(
+        id=item["cloud_file_id"],
+        name=item["file_name"],
+        size=int(item.get("size") or 0),
+        parent_id=item.get("cloud_parent_id") or hint.get("parent_id", ""),
+        mime_type=item.get("mime_type") or hint.get("mime_type", ""),
+        pick_code=hint.get("pick_code", ""),
+        path=hint.get("path", ""),
+    )
+
+
+@app.post("/api/play/prepare")
+async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
+    _limit_play(request)
+    try:
+        inspection = await _inspect(payload)
+        candidates = [item for item in inspection.files if not item.is_dir and item.browser.playable]
+        selected = next((item for item in candidates if item.id == payload.file_id), None) if payload.file_id else None
+        selected = selected or (candidates[0] if candidates else None)
+        if not selected:
+            raise CapabilityError("这个资源没有确认适合网页播放的 MP4/H.264/AAC 或 WebM 文件")
+        existing = store.find_ready_temp(payload.provider.value, str(payload.share_url), selected.name)
+        if existing:
+            return {"temp_id": existing["id"], "play_url": f"/api/play/{existing['id']}", "reused": True}
+        adapter = _adapter(payload.provider.value)
+        folder = await adapter.ensure_folder(adapter.root_id, "/", settings.temp_folder_name)
+        saved = await adapter.save_share(inspection, folder.id, folder.path, [selected.id], "skip")
+        saved_file = next((item for item in saved.saved_files if item.name == selected.name), None)
+        if not saved_file:
+            located = await adapter.locate_saved_files(folder.id, folder.path, [selected.name])
+            saved_file = located[0] if located else None
+        if not saved_file:
+            raise CloudError("网盘已接受临时保存，但暂时找不到视频文件，请稍后重试")
+        now = datetime.now(UTC)
+        temp_id = uuid.uuid4().hex
+        store.add_temp({
+            "id": temp_id,
+            "provider": payload.provider.value,
+            "title": payload.title,
+            "share_url": str(payload.share_url),
+            "extraction_code": payload.extraction_code,
+            "cloud_file_id": saved_file.id,
+            "cloud_parent_id": saved_file.parent_id or folder.id,
+            "file_name": saved_file.name,
+            "mime_type": saved_file.mime_type,
+            "size": saved_file.size,
+            "direct_hint": _file_hint(saved_file, selected.id),
+            "last_played_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
+            "state": "ready",
+            "created_at": now.isoformat(),
+        })
+        store.add_history("prepare_play", payload.provider.value, f"临时保存 {saved_file.name}")
+        return {"temp_id": temp_id, "play_url": f"/api/play/{temp_id}", "reused": False}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.get("/api/play/{temp_id}")
+async def stream_temp(temp_id: str, request: Request) -> StreamingResponse:
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="临时播放文件不存在") from error
+    if item["state"] != "ready":
+        raise HTTPException(status_code=410, detail="临时播放文件已经清理")
+    now = datetime.now(UTC)
+    store.touch_temp(temp_id, now.isoformat(), (now + timedelta(hours=settings.temp_retention_hours)).isoformat())
+    try:
+        direct = await _adapter(item["provider"]).direct_link(_temp_file(item))
+        client = httpx.AsyncClient(timeout=None, follow_redirects=True)
+        upstream_headers = dict(direct.headers)
+        if request.headers.get("range"):
+            upstream_headers["Range"] = request.headers["range"]
+        upstream_request = client.build_request("GET", direct.url, headers=upstream_headers)
+        response = await client.send(upstream_request, stream=True)
+        if response.status_code >= 400:
+            await response.aclose()
+            await client.aclose()
+            raise CloudError(f"网盘播放地址返回 HTTP {response.status_code}")
+
+        async def chunks() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in response.aiter_bytes(1024 * 512):
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        headers = {
+            key: value
+            for key, value in response.headers.items()
+            if key.lower() in {"content-length", "content-range", "accept-ranges", "etag", "last-modified"}
+        }
+        return StreamingResponse(
+            chunks(),
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type") or direct.mime_type,
+            headers=headers,
+        )
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.get("/api/admin/overview")
+def admin_overview(_: str = Depends(require_admin)) -> dict[str, Any]:
+    accounts = {item["provider"]: item for item in store.accounts()}
+    last_dirs = store.last_directories()
+    return {
+        "accounts": [
+            {**accounts[name], "label": ProviderRegistry.labels[name], "configured": vault.configured(f"provider_{name}"), "last_directory": last_dirs.get(name)}
+            for name in ("baidu", "quark", "115", "china_mobile")
+        ],
+        "jobs": store.jobs(),
+        "temporary": store.temps(),
+        "subscriptions": store.subscriptions(),
+        "history": store.history(30),
+    }
+
+
+@app.put("/api/admin/accounts/{provider}")
+async def save_account(provider: ProviderName, payload: CredentialRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
+    name = provider.value
+    try:
+        adapter = ProviderRegistry.create(name, payload.credential)
+        account = await adapter.probe()
+        vault.save(f"provider_{name}", payload.credential)
+        return store.update_account(
+            name,
+            state="connected",
+            account_label=str(account.get("account") or payload.account_label),
+            credential_kind=payload.kind,
+            risk_status="normal",
+            last_error="",
+        )
+    except Exception as error:
+        store.update_account(name, state="error", last_error=str(error)[:300], risk_status="warning")
+        raise _cloud_error(error) from error
+
+
+@app.delete("/api/admin/accounts/{provider}")
+def remove_account(provider: ProviderName, _: str = Depends(require_admin)) -> dict[str, Any]:
+    vault.delete(f"provider_{provider.value}")
+    store.update_account(provider.value, state="disconnected", account_label="", credential_kind="", risk_status="unknown", last_error="")
+    return {"ok": True}
+
+
+@app.post("/api/admin/accounts/{provider}/probe")
+async def probe_account(provider: ProviderName, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        data = await _adapter(provider.value).probe()
+        store.update_account(provider.value, state="connected", risk_status="normal", last_error="", account_label=str(data.get("account") or "已授权"))
+        return {"ok": True, **data}
+    except Exception as error:
+        store.update_account(provider.value, state="error", risk_status="warning", last_error=str(error)[:300])
+        raise _cloud_error(error) from error
+
+
+@app.post("/api/admin/accounts/115/qr/start")
+async def qr_start(_: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        public, secret_value = await start_115_qr()
+    except (ProviderAuthError, httpx.HTTPError) as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    session_id = uuid.uuid4().hex
+    _qr_sessions[session_id] = {"expires": time.time() + 300, "secret": secret_value}
+    return {"session_id": session_id, **public}
+
+
+@app.get("/api/admin/accounts/115/qr/{session_id}")
+async def qr_poll(session_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
+    session_value = _qr_sessions.get(session_id)
+    if not session_value or session_value["expires"] < time.time():
+        raise HTTPException(status_code=410, detail="二维码已过期，请刷新")
+    try:
+        state, message, credential = await poll_115_qr(session_value["secret"])
+        if credential:
+            adapter = ProviderRegistry.create("115", credential)
+            account = await adapter.probe()
+            vault.save("provider_115", credential)
+            store.update_account("115", state="connected", account_label=str(account.get("account") or "115账号"), credential_kind="qr", risk_status="normal", last_error="")
+            _qr_sessions.pop(session_id, None)
+        return {"state": state, "message": message}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.post("/api/admin/accounts/{provider}/directories")
+async def directories(provider: ProviderName, payload: DirectoryRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        items = await _adapter(provider.value).list_directories(payload.parent_id, payload.parent_path)
+        return {"items": [item.__dict__ if hasattr(item, "__dict__") else {"id": item.id, "name": item.name, "path": item.path} for item in items]}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.post("/api/admin/accounts/{provider}/folders")
+async def create_folder(provider: ProviderName, payload: CreateFolderRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        item = await _adapter(provider.value).create_folder(payload.parent_id, payload.parent_path, payload.name)
+        return {"id": item.id, "name": item.name, "path": item.path}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+async def _run_save_job(job_id: int, payload: TransferRequest) -> None:
+    try:
+        store.update_job(job_id, status="running", progress=10, stage="正在读取分享内容")
+        inspection = await _inspect(payload)
+        adapter = _adapter(payload.provider.value)
+        selected = [item for item in inspection.files if item.id in set(payload.selected_file_ids)]
+        names = [item.name for item in selected] if selected else [item.name for item in inspection.files if not item.is_dir]
+        existing = await adapter.locate_saved_files(payload.target_id, payload.target_path, names)
+        if existing and payload.duplicate_policy == "skip":
+            store.update_job(job_id, status="success", progress=100, stage="同名内容已存在，已跳过", detail={"duplicate": True, "files": [item.name for item in existing]})
+            return
+        store.update_job(job_id, progress=45, stage="正在同网盘保存")
+        result = await adapter.save_share(inspection, payload.target_id, payload.target_path, payload.selected_file_ids, payload.duplicate_policy)
+        store.save_last_directory(payload.provider.value, payload.target_id, payload.target_path)
+        detail = {"message": result.message, "files": [item.name for item in result.saved_files], "duplicate": result.duplicate}
+        store.update_job(job_id, status="success", progress=100, stage="保存完成", detail=detail)
+        store.add_history("permanent_save", payload.provider.value, f"{payload.title} → {payload.target_path}")
+        integration = _integration_values()
+        try:
+            await send_telegram(integration["telegram_bot_token"], integration["telegram_chat_id"], f"飞海网盘：{payload.title} 已保存到 {payload.target_path}")
+        except Exception:
+            pass
+    except Exception as error:
+        store.update_job(job_id, status="failed", stage="保存失败", error=str(error)[:500])
+
+
+@app.post("/api/admin/save")
+async def permanent_save(payload: TransferRequest, background: BackgroundTasks, _: str = Depends(require_admin)) -> dict[str, Any]:
+    detail = payload.model_dump(mode="json")
+    job = store.create_job("permanent_save", payload.provider.value, payload.title, detail)
+    background.add_task(_run_save_job, job["id"], payload)
+    return job
+
+
+@app.get("/api/admin/jobs")
+def jobs(_: str = Depends(require_admin)) -> dict[str, Any]:
+    return {"items": store.jobs()}
+
+
+@app.get("/api/admin/temporary")
+def temporary(_: str = Depends(require_admin)) -> dict[str, Any]:
+    return {"items": store.temps()}
+
+
+@app.post("/api/admin/temporary/{temp_id}/keep")
+async def keep_temporary(temp_id: str, payload: KeepTemporaryRequest, background: BackgroundTasks, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="临时文件不存在") from error
+    transfer = TransferRequest(
+        provider=item["provider"],
+        share_url=item["share_url"],
+        extraction_code=item["extraction_code"],
+        title=item["title"],
+        target_id=payload.target_id,
+        target_path=payload.target_path,
+        selected_file_ids=[item["direct_hint"].get("source_file_id", "")],
+        duplicate_policy=payload.duplicate_policy,
+    )
+    job = store.create_job("keep_temporary", item["provider"], item["title"], transfer.model_dump(mode="json"))
+
+    async def run_keep() -> None:
+        await _run_save_job(job["id"], transfer)
+        current = store.job(job["id"])
+        if current["status"] == "success":
+            try:
+                await _adapter(item["provider"]).delete([item["cloud_file_id"]], [item["direct_hint"].get("path", "")])
+                store.set_temp_state(temp_id, "kept")
+            except Exception:
+                store.set_temp_state(temp_id, "cleanup_failed")
+
+    background.add_task(run_keep)
+    return job
+
+
+@app.get("/api/admin/integrations")
+def get_integrations(_: str = Depends(require_admin)) -> dict[str, Any]:
+    values = _integration_values()
+    return {
+        "pansou_url": values["pansou_url"],
+        "checker_url": values["checker_url"],
+        "tmdb_configured": bool(values["tmdb_api_key"]),
+        "telegram_configured": bool(values["telegram_bot_token"] and values["telegram_chat_id"]),
+        "tmdb_guide": "https://developer.themoviedb.org/docs/getting-started",
+        "rules": {"hide_only_explicit_invalid": True, "single_port": 12366},
+    }
+
+
+@app.put("/api/admin/integrations")
+def save_integrations(payload: IntegrationSettingsRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
+    store.save_settings({"pansou_url": payload.pansou_url.rstrip("/"), "checker_url": payload.checker_url.rstrip("/")})
+    if payload.tmdb_api_key:
+        vault.save("tmdb_api_key", payload.tmdb_api_key)
+    if payload.telegram_bot_token:
+        vault.save("telegram_bot_token", payload.telegram_bot_token)
+    if payload.telegram_chat_id:
+        vault.save("telegram_chat_id", payload.telegram_chat_id)
+    return get_integrations(_)
+
+
+@app.post("/api/admin/subscriptions")
+def add_subscription(payload: SubscriptionRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
+    return store.add_subscription(payload.title, payload.media_type, payload.year)
+
+
+@app.delete("/api/admin/subscriptions/{subscription_id}")
+def delete_subscription(subscription_id: int, _: str = Depends(require_admin)) -> dict[str, Any]:
+    store.remove_subscription(subscription_id)
+    return {"ok": True}
