@@ -1,6 +1,7 @@
 const app = document.querySelector("#app"),
   modalRoot = document.querySelector("#modalRoot");
 const state = {
+  isAdmin: document.body.dataset.admin === "true",
   page: "home",
   overview: null,
   query: "",
@@ -25,6 +26,7 @@ const titles = {
   accounts: ["网盘账号", "按 115、百度、夸克、移动顺序管理授权。"],
   risk: ["风险中心", "检测授权失效、访问受限和网关异常，不绕过网盘风控。"],
   settings: ["设置", "Telegram、元数据、命名规则与飞牛影视目录。"],
+  public: ["公开网盘目录", "管理员允许前台查看的指定目录；只能浏览，不能修改或删除。"],
 };
 const esc = (v = "") => {
   const n = document.createElement("div");
@@ -74,17 +76,23 @@ async function api(url, opt = {}) {
 }
 async function boot() {
   try {
-    state.overview = await api("/api/overview");
-    document.querySelector("#systemState span").textContent = "系统正常";
+    state.overview = await api(state.isAdmin ? "/api/overview" : "/api/public/overview", { keepUnauthorized: true });
+    const systemState = document.querySelector("#systemState span");
+    if (systemState) systemState.textContent = "系统正常";
     render();
   } catch (e) {
-    document.querySelector("#systemState span").textContent = "需要检查";
+    const systemState = document.querySelector("#systemState span");
+    if (systemState) systemState.textContent = "需要检查";
     app.innerHTML = `<section class="error-card"><h1>启动信息读取失败</h1><p>${esc(e.message)}</p><button class="primary" onclick="location.reload()">重新加载</button></section>`;
   }
 }
 function nav(page) {
   if (!state.overview) {
     toast("正在读取数据，请稍候");
+    return;
+  }
+  if (!state.isAdmin && !["home", "search", "public"].includes(page)) {
+    location.href = "/login";
     return;
   }
   state.page = page;
@@ -98,17 +106,19 @@ document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-page]");
   if (t) nav(t.dataset.page);
 });
-document.querySelector("#globalSearch").onsubmit = (e) => {
-  e.preventDefault();
-  state.query = new FormData(e.currentTarget).get("q").trim();
-  nav("search");
-  search();
-};
+const globalSearch = document.querySelector("#globalSearch");
+if (globalSearch)
+  globalSearch.onsubmit = (e) => {
+    e.preventDefault();
+    state.query = new FormData(e.currentTarget).get("q").trim();
+    nav("search");
+    search();
+  };
 
 function render() {
   if (state.page === "home") return home();
   const [a, b] = titles[state.page];
-  app.innerHTML = `<header class="page-heading"><div><span>飞海网盘 · FNOS</span><h1>${a}</h1><p>${b}</p></div><em>数据保存在本机 NAS</em></header>${{ search: searchPage, following, library, accounts, risk, settings }[state.page]()}`;
+  app.innerHTML = `<header class="page-heading"><div><span>飞海网盘 · FNOS</span><h1>${a}</h1><p>${b}</p></div><em>${state.isAdmin ? "管理员后台" : "只读公开访问"}</em></header>${{ search: searchPage, following, library, accounts, risk, settings, public: publicDirectories }[state.page]()}`;
   bind();
 }
 function providerCards() {
@@ -119,6 +129,47 @@ function providerCards() {
       return `<button class="provider-mini" data-page="accounts"><i style="background:${m.color}">${m.short}</i><span><b>${m.label}</b><small>${ok ? x.account_mask || "已连接" : "等待授权"}</small></span><em class="${x.risk_status === "normal" ? "ok" : x.risk_status.includes("unreachable") ? "warn" : "muted"}">${x.risk_status === "normal" ? "正常" : ok ? "待检测" : "未连接"}</em></button>`;
     })
     .join("");
+}
+function publicDirectoryCard(x) {
+  const m = pm[x.provider] || { short: "盘", color: "#14784b", label: x.provider_label };
+  return `<button class="public-directory-card" data-public-dir="${esc(x.id)}"><i style="background:${m.color}">${m.short}</i><span><b>${esc(x.label)}</b><small>${esc(x.provider_label)} · 只读</small></span><em>查看 →</em></button>`;
+}
+function publicDirectories() {
+  const entries = state.overview.public_directories || [];
+  return `<section class="public-directory-page"><div class="public-notice"><b>只读公开访问</b><span>这里只显示管理员在后台指定的目录，不能删除、移动、上传或查看其他位置。</span></div><div class="public-directory-grid">${entries.map(publicDirectoryCard).join("") || '<div class="empty-state compact"><h2>暂未开放网盘目录</h2><p>管理员登录后可在“设置”中选择允许前台查看的目录。</p></div>'}</div></section>`;
+}
+function fileSize(value) {
+  let size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let index = -1;
+  do { size /= 1024; index += 1; } while (size >= 1024 && index < units.length - 1);
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
+}
+function canPlayOnline(name) {
+  return /\.(mp4|m4v|webm|mov|mkv|avi|ts|m2ts)$/i.test(name || "");
+}
+function playPublicVideo(id, path, name) {
+  const source = `/api/public/directories/${encodeURIComponent(id)}/stream?path=${encodeURIComponent(path)}`;
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal public-player"><button class="modal-close">×</button><video controls autoplay playsinline src="${source}"></video><footer><b>${esc(name)}</b><span>仅在线播放，不提供转存或下载</span></footer></section></div>`;
+  modalRoot.querySelector(".modal-close").onclick = close;
+}
+async function browsePublicDirectory(id, path = "") {
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="form-modal directory-modal public-browser"><button class="modal-close">×</button><h2>正在读取公开目录</h2><p class="directory-path">只读访问</p><div class="directory-list"><span class="spinner"></span></div></section></div>`;
+  modalRoot.querySelector(".modal-close").onclick = close;
+  const box = modalRoot.querySelector(".public-browser"), list = box.querySelector(".directory-list");
+  try {
+    const data = await api(`/api/public/directories/${id}/browse`, { method: "POST", body: JSON.stringify({ path }), keepUnauthorized: true });
+    box.querySelector("h2").textContent = data.label;
+    box.querySelector(".directory-path").textContent = `${data.provider_label} / ${data.path || "根目录"}`;
+    list.innerHTML = `${data.path ? '<button class="directory-up">← 返回上一级</button>' : ""}${data.contents.map((item) => item.type === "directory" ? `<button class="directory-item" data-public-path="${esc(item.path)}"><span>▣</span><b>${esc(item.name)}</b><em>进入 →</em></button>` : canPlayOnline(item.name) ? `<button class="public-file playable" data-public-play="${esc(item.path)}" data-public-name="${esc(item.name)}"><span>▶</span><b>${esc(item.name)}</b><small>${fileSize(item.size)} · 在线播放</small></button>` : `<div class="public-file"><span>▤</span><b>${esc(item.name)}</b><small>${fileSize(item.size)}</small></div>`).join("") || "<p>这个目录是空的</p>"}`;
+    list.querySelectorAll("[data-public-path]").forEach((node) => node.onclick = () => browsePublicDirectory(id, node.dataset.publicPath));
+    list.querySelectorAll("[data-public-play]").forEach((node) => node.onclick = () => playPublicVideo(id, node.dataset.publicPlay, node.dataset.publicName));
+    const up = list.querySelector(".directory-up");
+    if (up) up.onclick = () => browsePublicDirectory(id, path.split("/").slice(0, -1).join("/"));
+  } catch (error) {
+    list.innerHTML = `<div class="form-error">${esc(error.message)}</div>`;
+  }
 }
 function poster(x) {
   const pic = x.poster
@@ -157,8 +208,17 @@ function home() {
   const r = state.overview.ranking,
     x = r.items || [],
     hero = x[0] || {},
-    has = x.length > 0;
-  app.innerHTML = `<section class="hero ${has ? "" : "hero-empty"}" ${hero.backdrop ? `style="background-image:url('${esc(hero.backdrop)}')"` : ""}><div class="hero-shade"></div><div class="hero-copy"><span>${has ? `最新排行 · #${hero.rank || 1}` : "实时榜单尚未启用"}</span><h1>${esc(hero.title || "连接 TMDB")}</h1><p class="meta">${has ? `${esc(hero.year || "")} · ${hero.media_type === "movie" ? "电影" : "剧集"} · TMDB ${hero.score || "—"} 分` : "首页不会使用示例影视或虚构排名"}</p><p>${esc(hero.overview || r.message || "请在设置中填写 TMDB API 密钥，测试成功后立即显示真实海报榜单。")}</p><div>${has ? `<button class="primary" data-movie='${esc(JSON.stringify(hero))}'>查看与搜索资源</button><button class="glass" data-follow-title="${esc(hero.title || "")}" data-follow-type="${hero.media_type || "tv"}">+ 订阅追更</button>` : '<button class="primary" data-page="settings">前往 TMDB 设置</button>'}</div></div><div class="hero-badge"><b>${r.live ? "实时" : "未连接"}</b><span>${r.live ? `更新于 ${date(r.updated_at)}` : "没有展示假数据"}</span></div></section><section class="provider-strip"><header><div><span>网盘连接</span><small>独立使用，不进行跨盘秒传</small></div><button data-page="accounts">管理账号 →</button></header><div class="provider-grid">${providerCards()}</div></section><section class="content-section"><header class="section-head"><div><span>全量影视排行</span><h2>最新上映与热门内容</h2><p>不限制日期，按上映或首播时间从新到旧；同日按热度排序</p></div><div class="segments">${[
+    has = x.length > 0,
+    directories = state.overview.public_directories || [],
+    heroActions = has
+      ? `<button class="primary" data-movie='${esc(JSON.stringify(hero))}'>查看详情</button>${state.isAdmin ? `<button class="glass" data-follow-title="${esc(hero.title || "")}" data-follow-type="${hero.media_type || "tv"}">+ 订阅追更</button>` : ""}`
+      : state.isAdmin
+        ? '<button class="primary" data-page="settings">前往 TMDB 设置</button>'
+        : '<a class="primary public-action" href="/login">管理员配置 TMDB</a>',
+    accessStrip = state.isAdmin
+      ? `<section class="provider-strip"><header><div><span>网盘连接</span><small>独立使用，不进行跨盘秒传</small></div><button data-page="accounts">管理账号 →</button></header><div class="provider-grid">${providerCards()}</div></section>`
+      : `<section class="provider-strip"><header><div><span>公开目录</span><small>管理员已指定 ${directories.length} 个只读目录</small></div><button data-page="public">查看目录 →</button></header><div class="public-mini-grid">${directories.slice(0, 4).map(publicDirectoryCard).join("") || '<p class="muted-copy">管理员暂未开放网盘目录。</p>'}</div></section>`;
+  app.innerHTML = `<section class="hero ${has ? "" : "hero-empty"}" ${hero.backdrop ? `style="background-image:url('${esc(hero.backdrop)}')"` : ""}><div class="hero-shade"></div><div class="hero-copy"><span>${has ? `最新排行 · #${hero.rank || 1}` : "实时榜单尚未启用"}</span><h1>${esc(hero.title || "连接 TMDB")}</h1><p class="meta">${has ? `${esc(hero.year || "")} · ${hero.media_type === "movie" ? "电影" : "剧集"} · TMDB ${hero.score || "—"} 分` : "首页不会使用示例影视或虚构排名"}</p><p>${esc(hero.overview || r.message || "管理员配置 TMDB 后会显示真实海报榜单。")}</p><div>${heroActions}</div></div><div class="hero-badge"><b>${r.live ? "实时" : "未连接"}</b><span>${r.live ? `更新于 ${date(r.updated_at)}` : "没有展示假数据"}</span></div></section>${accessStrip}<section class="content-section"><header class="section-head"><div><span>全量影视排行</span><h2>最新上映与热门内容</h2><p>不限制日期，按上映或首播时间从新到旧；同日按热度排序</p></div><div class="segments">${[
     ["all", "全部"],
     ["movie", "电影"],
     ["tv", "剧集"],
@@ -169,7 +229,7 @@ function home() {
     )
     .join(
       "",
-    )}</div></header>${rankingFilters()}${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>没有符合筛选的内容</h2><p>可以清除年份、类型或国家/地区后重试；未配置 TMDB 时请先前往设置。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>检测网站明确判定失效的来源自动隐藏，其余来源保留并显示检测状态。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>有效性检测</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
+    )}</div></header>${rankingFilters()}${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>没有符合筛选的内容</h2><p>可以清除年份、类型或国家/地区后重试。</p></div>'}</section>${state.isAdmin ? '<section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>后台检测并隐藏明确失效的来源，前台资源卡片不再显示检测状态。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>有效性检测</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>' : ""}`;
   bind();
 }
 
@@ -197,7 +257,7 @@ async function loadRanking(type, page) {
 }
 
 function searchPage() {
-  return `<section class="search-panel"><form id="resourceSearch"><span>⌕</span><input name="q" value="${esc(state.query)}" placeholder="输入电影、剧集、动漫或综艺名称" required><button class="primary">搜索</button></form><p>通过你在后台连接的 Pansou 搜索，再交给你的检测网站筛除失效链接。</p></section><section id="searchOutput">${state.search ? results() : `<div class="empty-state"><i>⌕</i><h2>搜索全网影视资源</h2><p>请先在“设置”中连接自己的 Pansou 和检测网站</p></div>`}</section>`;
+  return `<section class="search-panel"><form id="resourceSearch"><span>⌕</span><input name="q" value="${esc(state.query)}" placeholder="输入电影、剧集、动漫或综艺名称" required><button class="primary">搜索</button></form><p>${state.isAdmin ? "通过你在后台连接的 Pansou 搜索，再交给你的检测网站筛除失效链接。" : "可以搜索并查看资源海报、简介和信息；追更与转存需要管理员登录。"}</p></section><section id="searchOutput">${state.search ? results() : `<div class="empty-state"><i>⌕</i><h2>搜索全网影视资源</h2><p>输入影视名称开始搜索</p></div>`}</section>`;
 }
 function results() {
   const works = state.search.works || [],
@@ -208,7 +268,7 @@ function results() {
       state.provider === "all"
         ? all
         : all.filter((x) => x.provider === state.provider);
-  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>可用网盘资源 <em>${all.length}</em></button></div><div class="search-progress ${detector.status === "unavailable" ? "service-error" : ""}"><b>${detector.status === "unavailable" ? "检测服务异常，已保留全部未判失效资源" : "Pansou 搜索与外部检测完成"}</b><span>发现 ${p.discovered || 0}</span><span class="ok">有效 ${p.valid || 0}</span><span>暂不可验证 ${p.unverifiable || 0}</span><span>已失效并隐藏 ${p.invalid || 0}</span>${detector.message ? `<small>${esc(detector.message)}</small>` : ""}</div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>仅隐藏检测网站明确判定失效的资源</b>${[
+  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>可用网盘资源 <em>${all.length}</em></button></div><div class="search-progress ${detector.status === "unavailable" ? "service-error" : ""}"><b>${detector.status === "unavailable" ? "检测服务暂时不可用，资源仍正常显示" : "Pansou 搜索与外部检测完成"}</b><span>发现 ${p.discovered || 0}</span><span>已失效并隐藏 ${p.invalid || 0}</span></div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>只隐藏检测网站明确判定失效的资源</b>${[
     ["all", "全部"],
     ["115", "115"],
     ["baidu", "百度"],
@@ -230,16 +290,13 @@ function resource(x) {
       x.episode > 0
         ? `S${String(x.season || 1).padStart(2, "0")}E${String(x.episode).padStart(2, "0")}`
         : "集数待识别",
-    validation =
-      x.validation_state === "valid"
-        ? { cls: "valid", label: "✓ 检测有效", hint: x.provider === "115" ? "优先来源" : "可用来源" }
-        : x.validation_state === "detector_unavailable"
-          ? { cls: "pending", label: "! 检测服务异常", hint: "未判定失效" }
-          : { cls: "pending", label: "↻ 暂不可验证", hint: "未判定失效" },
     posterImage = work?.poster
       ? `<img src="${esc(work.poster)}" alt="${esc(work.title)}" loading="lazy">`
-      : `<span class="resource-poster-placeholder" style="background:${m.color}">${m.short}</span>`;
-  return `<article class="resource-row"><button class="resource-poster" data-resource-detail="${esc(x.fingerprint)}" aria-label="查看${esc(work?.title || x.normalized_title || x.title)}简介">${posterImage}<em>查看简介</em></button><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><button class="resource-title" data-resource-detail="${esc(x.fingerprint)}">${esc(work?.title || x.normalized_title || x.title)}</button>${work ? `<small class="resource-meta">${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}</small>` : '<small class="resource-meta">暂未匹配到 TMDB 影视信息</small>'}<p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status ${validation.cls}"><span>${validation.label}</span><small>${validation.hint}</small></div><div class="row-actions"><button data-resource-detail="${esc(x.fingerprint)}">查看简介</button><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
+      : `<span class="resource-poster-placeholder" style="background:${m.color}">${m.short}</span>`,
+    actions = state.isAdmin
+      ? `<button data-resource-detail="${esc(x.fingerprint)}">查看简介</button><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button>`
+      : `<button data-resource-detail="${esc(x.fingerprint)}">查看简介</button><a class="admin-login" href="/login">登录后转存</a>`;
+  return `<article class="resource-row"><button class="resource-poster" data-resource-detail="${esc(x.fingerprint)}" aria-label="查看${esc(work?.title || x.normalized_title || x.title)}简介">${posterImage}<em>查看简介</em></button><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><button class="resource-title" data-resource-detail="${esc(x.fingerprint)}">${esc(work?.title || x.normalized_title || x.title)}</button>${work ? `<small class="resource-meta">${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}</small>` : '<small class="resource-meta">暂未匹配到 TMDB 影视信息</small>'}<p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="row-actions">${actions}</div></article>`;
 }
 
 function normalizedMediaTitle(value = "") {
@@ -327,18 +384,13 @@ async function resourceDetails(resource) {
   }
   const m = pm[resource.provider],
     title = work?.title || resource.normalized_title || resource.title || "未知影视",
-    visual = work?.backdrop || work?.poster || "",
-    validation =
-      resource.validation_state === "valid"
-        ? "检测网站确认有效"
-        : resource.validation_state === "detector_unavailable"
-          ? "检测服务暂时不可用，未判定失效"
-          : "暂不可验证，未判定失效";
-  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal resource-detail-modal"><button class="modal-close">×</button><div class="detail-visual">${visual ? `<img src="${esc(visual)}" alt="${esc(title)}">` : ""}<div></div><span><small>${m.label} · ${esc(validation)}</small><h2>${esc(title)}</h2><p>${work ? `${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}` : "暂未匹配到 TMDB 影视信息"}</p><p>${esc(work?.overview || "TMDB 暂无该影视简介，网盘资源仍可复制或入库。")}</p></span></div><div class="resource-detail-info"><span><b>网盘来源</b>${m.label}</span><span><b>画质</b>${esc(resource.quality || "待识别")}</span><span><b>搜索来源</b>${esc(resource.source || "未知")}</span></div><footer><button data-copy-detail>复制链接</button><button class="primary" data-intake-detail>一键入库</button></footer></section></div>`;
+    visual = work?.backdrop || work?.poster || "";
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal resource-detail-modal"><button class="modal-close">×</button><div class="detail-visual">${visual ? `<img src="${esc(visual)}" alt="${esc(title)}">` : ""}<div></div><span><small>${m.label}</small><h2>${esc(title)}</h2><p>${work ? `${esc(work.year || "待定")} · ${work.media_type === "movie" ? "电影" : "剧集"} · TMDB ${work.score || "—"}` : "暂未匹配到 TMDB 影视信息"}</p><p>${esc(work?.overview || "TMDB 暂无该影视简介。")}</p></span></div><div class="resource-detail-info"><span><b>网盘来源</b>${m.label}</span><span><b>画质</b>${esc(resource.quality || "待识别")}</span><span><b>搜索来源</b>${esc(resource.source || "未知")}</span></div><footer>${state.isAdmin ? '<button data-copy-detail>复制链接</button><button class="primary" data-intake-detail>一键入库</button>' : '<a class="admin-login" href="/login">管理员登录后可转存</a>'}</footer></section></div>`;
   modalRoot.querySelector(".modal-close").onclick = close;
-  modalRoot.querySelector("[data-copy-detail]").onclick = () =>
+  const copyDetail = modalRoot.querySelector("[data-copy-detail]"), intakeDetail = modalRoot.querySelector("[data-intake-detail]");
+  if (copyDetail) copyDetail.onclick = () =>
     navigator.clipboard.writeText(resource.url).then(() => toast("链接已复制"));
-  modalRoot.querySelector("[data-intake-detail]").onclick = () => {
+  if (intakeDetail) intakeDetail.onclick = () => {
     close();
     intake(resource);
   };
@@ -433,6 +485,10 @@ function risk() {
       "",
     )}</div><section class="risk-table"><header><h3>最近检测记录</h3><span>不会绕过验证码或频率限制</span></header>${state.overview.risk_events.map((x) => `<div><i class="${x.level}">${x.level === "safe" ? "✓" : "!"}</i><span><b>${pm[x.provider]?.label || "系统"}</b><small>${esc(x.event_type)}</small></span><p>${esc(x.message)}</p><em>${esc(x.action)}</em><time>${date(x.created_at)}</time></div>`).join("") || '<div class="empty-row">点击“立即检测”生成第一份风险报告。</div>'}</section>`;
 }
+function publicSettingsCard() {
+  const entries = state.overview.public_directories || [];
+  return `<section class="settings-card full public-settings"><header><i>公</i><div><h3>前台公开网盘目录</h3><p>未登录访客只能查看这里指定的目录和子目录，不能修改文件，也不能访问其他位置</p></div><em class="setting-state connected">${entries.length} 个目录</em></header><div class="public-settings-list">${entries.map((entry) => `<div><span style="background:${(pm[entry.provider] || {}).color || "#14784b"}">${(pm[entry.provider] || {}).short || "盘"}</span><p><b>${esc(entry.label)}</b><small>${esc(entry.provider_label)} · ${esc(entry.path)}</small></p><button data-public-remove="${esc(entry.id)}">取消公开</button></div>`).join("") || '<p class="muted-copy">目前没有公开目录；前台不会显示任何网盘内容。</p>'}</div><div class="settings-actions"><a href="/" target="_blank">查看访客前台</a><button type="button" class="primary" id="addPublicDirectory">+ 选择公开目录</button></div></section>`;
+}
 function settings() {
   const s = {
     telegram_enabled: true,
@@ -523,6 +579,17 @@ function showProviderAuthGuide(provider) {
 }
 
 function bind() {
+  const settingsGrid = document.querySelector(".settings-grid");
+  if (state.isAdmin && state.page === "settings" && settingsGrid)
+    settingsGrid.insertAdjacentHTML("afterbegin", publicSettingsCard());
+  const addPublicDirectory = document.querySelector("#addPublicDirectory");
+  if (addPublicDirectory) addPublicDirectory.onclick = choosePublicProvider;
+  document.querySelectorAll("[data-public-remove]").forEach(
+    (e) => (e.onclick = () => removePublicDirectory(e.dataset.publicRemove)),
+  );
+  document.querySelectorAll("[data-public-dir]").forEach(
+    (e) => (e.onclick = () => browsePublicDirectory(e.dataset.publicDir)),
+  );
   document
     .querySelectorAll("[data-movie]")
     .forEach((e) => (e.onclick = () => movie(JSON.parse(e.dataset.movie))));
@@ -686,15 +753,16 @@ async function quickFollow(title, type = "tv") {
   }
 }
 function movie(x) {
-  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal"><button class="modal-close">×</button><div class="detail-visual">${x.backdrop ? `<img src="${esc(x.backdrop)}">` : ""}<div></div><span><small>影视详情</small><h2>${esc(x.title || "未知影视")}</h2><p>${esc(x.year || "")} · ${x.media_type === "movie" ? "电影" : "剧集"} · TMDB ${x.score || "—"}</p><p>${esc(x.overview || "暂无简介")}</p></span></div><footer><button class="search-this">搜索网盘资源</button><button class="primary follow-this">+ 订阅追更</button></footer></section></div>`;
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="detail-modal"><button class="modal-close">×</button><div class="detail-visual">${x.backdrop ? `<img src="${esc(x.backdrop)}">` : ""}<div></div><span><small>影视详情</small><h2>${esc(x.title || "未知影视")}</h2><p>${esc(x.year || "")} · ${x.media_type === "movie" ? "电影" : "剧集"} · TMDB ${x.score || "—"}</p><p>${esc(x.overview || "暂无简介")}</p></span></div>${state.isAdmin ? '<footer><button class="search-this">搜索网盘资源</button><button class="primary follow-this">+ 订阅追更</button></footer>' : '<footer><a class="admin-login" href="/login">管理员登录后可搜索资源和订阅</a></footer>'}</section></div>`;
   modalRoot.querySelector(".modal-close").onclick = close;
-  modalRoot.querySelector(".search-this").onclick = () => {
+  const searchThis = modalRoot.querySelector(".search-this"), followThis = modalRoot.querySelector(".follow-this");
+  if (searchThis) searchThis.onclick = () => {
     state.query = x.title;
     close();
     nav("search");
     search();
   };
-  modalRoot.querySelector(".follow-this").onclick = () => {
+  if (followThis) followThis.onclick = () => {
     close();
     quickFollow(x.title, x.media_type);
   };
@@ -777,6 +845,45 @@ async function directoryPicker(x, path = "") {
     list.innerHTML = `<div class="form-error">${esc(e.message)}</div><button class="directory-up">返回入库设置</button>`;
     list.querySelector("button").onclick = () => intake(x, path);
   }
+}
+function choosePublicProvider() {
+  const providers = (state.overview.providers || []).filter((item) => item.native_mount);
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="form-modal"><button class="modal-close">×</button><h2>选择要公开的网盘</h2><aside class="form-warning">下一步只能选择这个网盘中的一个目录。访客不能返回到该目录上级。</aside><div class="directory-list">${providers.map((item) => `<button class="directory-item" data-public-provider="${item.name}"><span style="color:${pm[item.name].color}">▣</span><b>${pm[item.name].label}</b><em>选择 →</em></button>`).join("") || '<p>当前没有可读取的飞牛网盘挂载。</p>'}</div></section></div>`;
+  modalRoot.querySelector(".modal-close").onclick = close;
+  modalRoot.querySelectorAll("[data-public-provider]").forEach((node) => node.onclick = () => publicDirectoryPicker(node.dataset.publicProvider));
+}
+async function publicDirectoryPicker(provider, path = "") {
+  const m = pm[provider];
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="form-modal directory-modal"><button class="modal-close">×</button><h2>选择 ${m.label} 公开目录</h2><p class="directory-path">正在读取真实目录…</p><div class="directory-list"><span class="spinner"></span></div><button class="primary submit-modal" disabled>公开当前目录</button></section></div>`;
+  const box = modalRoot.querySelector(".directory-modal"), list = box.querySelector(".directory-list"), current = box.querySelector(".directory-path"), choose = box.querySelector(".submit-modal");
+  box.querySelector(".modal-close").onclick = close;
+  try {
+    const data = await api(`/api/providers/${provider}/directories`, { method: "POST", body: JSON.stringify({ path: path || "/" }) });
+    path = data.path;
+    current.textContent = path;
+    choose.disabled = false;
+    list.innerHTML = `${path !== data.root ? '<button class="directory-up">← 返回上一级</button>' : ""}${data.directories.map((item) => `<button class="directory-item" data-path="${esc(item.path)}"><span>▣</span><b>${esc(item.name)}</b><em>进入 →</em></button>`).join("") || "<p>这个目录没有子文件夹</p>"}`;
+    list.querySelectorAll("[data-path]").forEach((node) => node.onclick = () => publicDirectoryPicker(provider, node.dataset.path));
+    const up = list.querySelector(".directory-up");
+    if (up) up.onclick = () => publicDirectoryPicker(provider, path.substring(0, path.lastIndexOf("/")) || data.root);
+    choose.onclick = () => savePublicDirectory(provider, path);
+  } catch (error) {
+    current.textContent = "无法读取目录";
+    list.innerHTML = `<div class="form-error">${esc(error.message)}</div>`;
+  }
+}
+async function savePublicDirectory(provider, path) {
+  const entries = (state.overview.public_directories || []).map((item) => ({ provider: item.provider, path: item.path, label: item.label }));
+  if (!entries.some((item) => item.provider === provider && item.path === path))
+    entries.push({ provider, path, label: path.split("/").filter(Boolean).pop() || pm[provider].label });
+  await api("/api/settings/public-directories", { method: "PUT", body: JSON.stringify({ entries }) });
+  close();
+  await refresh("公开目录已保存，访客前台立即生效");
+}
+async function removePublicDirectory(id) {
+  const entries = (state.overview.public_directories || []).filter((item) => item.id !== id).map((item) => ({ provider: item.provider, path: item.path, label: item.label }));
+  await api("/api/settings/public-directories", { method: "PUT", body: JSON.stringify({ entries }) });
+  await refresh("已取消公开；访客不能再查看该目录");
 }
 async function startAuth(p) {
   try {
@@ -994,52 +1101,7 @@ async function refresh(msg) {
   render();
   if (msg) toast(msg);
 }
-const gate = document.querySelector("#sessionGate"),
-  gateForm = document.querySelector("#sessionGateForm"),
-  gateKey = "feihai-tab-verified";
-function startVerifiedApp() {
-  gate.hidden = true;
-  document.body.classList.remove("session-locked");
-  boot();
-}
-async function verifyCurrentTab(e) {
-  e.preventDefault();
-  const button = gateForm.querySelector("button"),
-    error = gateForm.querySelector(".gate-error"),
-    password = new FormData(gateForm).get("password");
-  button.disabled = true;
-  button.textContent = "正在验证…";
-  error.textContent = "";
-  try {
-    await api("/api/verify-password", {
-      method: "POST",
-      body: JSON.stringify({ password }),
-      keepUnauthorized: true,
-    });
-    sessionStorage.setItem(gateKey, "1");
-    startVerifiedApp();
-  } catch (x) {
-    error.textContent = x.message;
-    button.disabled = false;
-    button.innerHTML = "验证并进入 <i>→</i>";
-    gateForm.password.select();
-  }
-}
-function requireTabVerification() {
-  const params = new URLSearchParams(location.search);
-  if (params.get("verified") === "1") {
-    sessionStorage.setItem(gateKey, "1");
-    history.replaceState({}, "", location.pathname);
-  }
-  if (sessionStorage.getItem(gateKey) === "1") startVerifiedApp();
-  else {
-    document.body.classList.add("session-locked");
-    gate.hidden = false;
-    gateForm.onsubmit = verifyCurrentTab;
-    setTimeout(() => gateForm.password.focus(), 50);
-  }
-}
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") close();
 });
-requireTabVerification();
+boot();

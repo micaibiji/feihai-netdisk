@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import mimetypes
 import os
 import secrets
 import time
@@ -14,7 +15,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -22,6 +23,7 @@ from .config import get_settings
 from .models import (CheckerSettingsRequest, DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
                      PansouSettingsRequest,
                      ProviderCredentialRequest, ResourceValidationRequest,
+                     PublicDirectoriesRequest, PublicDirectoryBrowseRequest,
                      SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
                      TmdbSettingsRequest)
 from .provider_auth import (ProviderAuthError, deserialize_secret,
@@ -57,7 +59,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.6", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.7", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -149,21 +151,21 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
 
 @app.post("/logout")
 def logout():
-    response = RedirectResponse("/login", status_code=303)
+    response = RedirectResponse("/", status_code=303)
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response
 
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
-    if not validate_session_token(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request=request, name="index.html", context={"app_name": settings.app_name})
+    is_admin = bool(validate_session_token(request.cookies.get(SESSION_COOKIE)))
+    return templates.TemplateResponse(request=request, name="index.html",
+                                      context={"app_name": settings.app_name, "is_admin": is_admin})
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.6", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.7", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -192,7 +194,19 @@ async def overview(_: str = Depends(require_login)):
                         "native_mounts": native_mount_status(),
                         **integration_public_settings()})
     return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
-            "risk_events": store.list_risk_events(8), "settings": ui_settings}
+            "risk_events": store.list_risk_events(8), "settings": ui_settings,
+            "public_directories": public_directory_entries()}
+
+
+@app.get("/api/public/session")
+def public_session(request: Request):
+    username = validate_session_token(request.cookies.get(SESSION_COOKIE))
+    return {"authenticated": bool(username), "username": username or ""}
+
+
+@app.get("/api/public/overview")
+async def public_overview():
+    return {"ranking": await current_trending(), "public_directories": public_directory_entries()}
 
 
 def provider_states() -> list[dict]:
@@ -271,6 +285,109 @@ def list_native_directories(provider: str, label: str, requested: str) -> tuple[
         for entry in entries
     ]
     return virtual_root, virtual_path, directories
+
+
+def provider_label(provider: str) -> str:
+    match = next((item.label for item in PROVIDERS if item.name.value == provider), None)
+    if not match:
+        raise HTTPException(404, "未知网盘")
+    return match
+
+
+def public_directory_id(provider: str, path: str) -> str:
+    return hashlib.sha256(f"{provider}:{path}".encode("utf-8")).hexdigest()[:16]
+
+
+def public_directory_entries() -> list[dict]:
+    raw = store.load_settings().get("public_directories", [])
+    if not isinstance(raw, list):
+        return []
+    output = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider", ""))
+        path = str(item.get("path", ""))
+        if provider not in {entry.name.value for entry in PROVIDERS} or not path:
+            continue
+        output.append({
+            "id": public_directory_id(provider, path),
+            "provider": provider,
+            "provider_label": provider_label(provider),
+            "path": path,
+            "label": str(item.get("label") or PurePosixPath(path).name or provider_label(provider)),
+        })
+    return output
+
+
+def list_public_directory_contents(entry: dict, relative_path: str) -> dict:
+    provider = entry["provider"]
+    label = provider_label(provider)
+    base_virtual = entry["path"]
+    relative = PurePosixPath(relative_path) if relative_path else PurePosixPath()
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise HTTPException(400, "目录格式不正确")
+    requested = base_virtual.rstrip("/")
+    if relative.parts:
+        requested += "/" + "/".join(relative.parts)
+
+    virtual_root = f"/{label}"
+    if base_virtual != virtual_root and not base_virtual.startswith(virtual_root + "/"):
+        raise HTTPException(400, "公开目录配置无效")
+    suffix = requested[len(virtual_root):].lstrip("/")
+    mount_root = settings.native_mount_path(provider).resolve()
+    target = (mount_root / Path(*PurePosixPath(suffix).parts)).resolve()
+    base_suffix = base_virtual[len(virtual_root):].lstrip("/")
+    base_target = (mount_root / Path(*PurePosixPath(base_suffix).parts)).resolve()
+    if target != base_target and base_target not in target.parents:
+        raise HTTPException(400, "不能访问公开目录之外的内容")
+    if target != mount_root and mount_root not in target.parents:
+        raise HTTPException(400, "目录超出网盘挂载范围")
+    try:
+        scanned = [item for item in os.scandir(target) if not item.is_symlink()]
+        scanned.sort(key=lambda item: (not item.is_dir(follow_symlinks=False), item.name.casefold()))
+        contents = []
+        for item in scanned:
+            is_directory = item.is_dir(follow_symlinks=False)
+            stat = item.stat(follow_symlinks=False)
+            item_relative = "/".join((*relative.parts, item.name))
+            contents.append({
+                "name": item.name,
+                "type": "directory" if is_directory else "file",
+                "path": item_relative,
+                "size": 0 if is_directory else stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            })
+    except FileNotFoundError as error:
+        raise HTTPException(404, "公开目录不存在或网盘已经断开") from error
+    except (PermissionError, OSError) as error:
+        raise HTTPException(502, "飞牛远程挂载暂时无法读取") from error
+    return {
+        "id": entry["id"], "label": entry["label"], "provider": provider,
+        "provider_label": entry["provider_label"], "path": "/".join(relative.parts),
+        "contents": contents,
+    }
+
+
+def resolve_public_file(entry: dict, relative_path: str) -> Path:
+    relative = PurePosixPath(relative_path)
+    if not relative.parts or relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative.parts):
+        raise HTTPException(400, "文件路径格式不正确")
+    provider = entry["provider"]
+    label = provider_label(provider)
+    virtual_root = f"/{label}"
+    base_virtual = entry["path"]
+    base_suffix = base_virtual[len(virtual_root):].lstrip("/")
+    mount_root = settings.native_mount_path(provider).resolve()
+    base_target = (mount_root / Path(*PurePosixPath(base_suffix).parts)).resolve()
+    candidate = base_target / Path(*relative.parts)
+    target = candidate.resolve()
+    if target != base_target and base_target not in target.parents:
+        raise HTTPException(400, "不能访问公开目录之外的文件")
+    if candidate.is_symlink() or not target.is_file():
+        raise HTTPException(404, "视频文件不存在")
+    return target
 
 
 def tmdb_config() -> dict[str, str]:
@@ -511,8 +628,7 @@ async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
 async def tmdb_trending(media_type: str = "all", page: int = Query(default=1, ge=1, le=500),
                         year: int | None = Query(default=None, ge=1900, le=2200),
                         genre: str | None = Query(default=None, pattern="^(action|animation|comedy|crime|documentary|drama|family|mystery|romance|scifi)$"),
-                        country: str | None = Query(default=None, pattern="^(CN|US|GB|JP|KR|HK|TW|IN|FR|DE)$"),
-                        _: str = Depends(require_login)):
+                        country: str | None = Query(default=None, pattern="^(CN|US|GB|JP|KR|HK|TW|IN|FR|DE)$")):
     try:
         return await current_trending(media_type, page, year, genre, country)
     except Exception as error:
@@ -520,7 +636,7 @@ async def tmdb_trending(media_type: str = "all", page: int = Query(default=1, ge
 
 
 @app.get("/api/tmdb/search")
-async def tmdb_search(q: str = Query(min_length=1, max_length=100), _: str = Depends(require_login)):
+async def tmdb_search(q: str = Query(min_length=1, max_length=100)):
     try:
         config = tmdb_config()
         return await search_tmdb(settings, q, api_key=config["api_key"],
@@ -529,8 +645,17 @@ async def tmdb_search(q: str = Query(min_length=1, max_length=100), _: str = Dep
         raise HTTPException(502, f"TMDB查询失败：{error}") from error
 
 
+def resource_for_viewer(item: dict, is_admin: bool) -> dict:
+    """Do not send transferable share links to unauthenticated visitors."""
+    result = item.copy()
+    if not is_admin:
+        result.pop("url", None)
+        result.pop("validation_reason", None)
+    return result
+
+
 @app.get("/api/search")
-async def resource_search(q: str = Query(min_length=1, max_length=100), _: str = Depends(require_login)):
+async def resource_search(request: Request, q: str = Query(min_length=1, max_length=100)):
     try:
         config = tmdb_config()
         discovered, works = await asyncio.gather(
@@ -562,7 +687,9 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
             return item, validation.state
 
         checked = await asyncio.gather(*(check(item) for item in discovered[:100]))
-        visible = [item for item, state in checked if should_show_resource(state)]
+        is_admin = bool(validate_session_token(request.cookies.get(SESSION_COOKIE)))
+        visible = [resource_for_viewer(item, is_admin) for item, state in checked
+                   if should_show_resource(state)]
         counts: dict[str, int] = {"discovered": len(discovered), "valid": 0, "invalid": 0,
                                   "unverifiable": 0, "pending_recognition": 0,
                                   "detector_unavailable": 0}
@@ -642,6 +769,58 @@ def get_app_settings(_: str = Depends(require_login)):
 def update_app_settings(payload: SettingsRequest, _: str = Depends(require_login)):
     store.save_settings(payload.model_dump())
     return {"saved": True, "settings": store.load_settings()}
+
+
+@app.get("/api/settings/public-directories")
+def get_public_directories(_: str = Depends(require_login)):
+    return {"entries": public_directory_entries()}
+
+
+@app.put("/api/settings/public-directories")
+def update_public_directories(payload: PublicDirectoriesRequest, _: str = Depends(require_login)):
+    normalized = []
+    seen = set()
+    for item in payload.entries:
+        provider = item.provider.value
+        if not native_mount_available(provider):
+            raise HTTPException(409, f"{provider_label(provider)}尚未在飞牛文件管理中挂载")
+        _, path, _ = list_native_directories(provider, provider_label(provider), item.path)
+        key = (provider, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"provider": provider, "path": path,
+                           "label": item.label.strip() or PurePosixPath(path).name})
+    store.save_settings({"public_directories": normalized})
+    return {"saved": True, "entries": public_directory_entries()}
+
+
+@app.post("/api/public/directories/{directory_id}/browse")
+def browse_public_directory(directory_id: str, payload: PublicDirectoryBrowseRequest):
+    entry = next((item for item in public_directory_entries() if item["id"] == directory_id), None)
+    if not entry:
+        raise HTTPException(404, "公开目录不存在或已经取消公开")
+    if not native_mount_available(entry["provider"]):
+        raise HTTPException(503, "网盘暂时未连接")
+    return list_public_directory_contents(entry, payload.path)
+
+
+@app.get("/api/public/directories/{directory_id}/stream")
+def stream_public_video(directory_id: str, path: str = Query(min_length=1, max_length=1000)):
+    entry = next((item for item in public_directory_entries() if item["id"] == directory_id), None)
+    if not entry:
+        raise HTTPException(404, "公开目录不存在或已经取消公开")
+    if not native_mount_available(entry["provider"]):
+        raise HTTPException(503, "网盘暂时未连接")
+    target = resolve_public_file(entry, path)
+    allowed = {".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ts", ".m2ts"}
+    if target.suffix.lower() not in allowed:
+        raise HTTPException(415, "该文件不支持在线播放")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name,
+                        content_disposition_type="inline",
+                        headers={"Cache-Control": "private, no-store",
+                                 "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/settings/integrations")

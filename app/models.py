@@ -114,6 +114,20 @@ class DirectoryRequest(BaseModel):
     path: str = Field(default="/", max_length=1000)
 
 
+class PublicDirectoryEntry(BaseModel):
+    provider: ProviderName
+    path: str = Field(min_length=1, max_length=1000)
+    label: str = Field(default="", max_length=100)
+
+
+class PublicDirectoriesRequest(BaseModel):
+    entries: list[PublicDirectoryEntry] = Field(default_factory=list, max_length=30)
+
+
+class PublicDirectoryBrowseRequest(BaseModel):
+    path: str = Field(default="", max_length=1000)
+
+
 class ProviderCredentialRequest(BaseModel):
     credential: str = Field(min_length=6, max_length=12000)
     account_mask: str = Field(default="已授权账号", max_length=100)

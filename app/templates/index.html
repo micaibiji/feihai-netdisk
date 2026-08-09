@@ -5,45 +5,45 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0b7a47">
   <title>{{ app_name }}</title>
-  <link rel="stylesheet" href="/static/app.css?v=0452">
-  <link rel="stylesheet" href="/static/integrations.css?v=0452">
+  <link rel="stylesheet" href="/static/app.css?v=0470">
+  <link rel="stylesheet" href="/static/integrations.css?v=0470">
 </head>
-<body>
+<body data-admin="{{ 'true' if is_admin else 'false' }}">
   <header class="topbar">
-    <button class="brand" data-page="home" aria-label="返回首页"><span class="brand-mark"><i></i><i></i><i></i></span><b>飞海网盘</b><em>PRIVATE</em></button>
+    <button class="brand" data-page="home" aria-label="返回首页"><span class="brand-mark"><i></i><i></i><i></i></span><b>飞海网盘</b><em>{{ 'ADMIN' if is_admin else 'PUBLIC' }}</em></button>
+    {% if is_admin %}
     <form id="globalSearch" class="global-search"><span>⌕</span><input name="q" placeholder="搜索影视作品与网盘资源" autocomplete="off"><kbd>Enter</kbd></form>
     <nav class="top-nav"><button data-page="home" class="active">首页</button><button data-page="search">资源搜索</button><button data-page="following">我的追更</button><button data-page="library">媒体库</button></nav>
-    <button id="systemState" class="health" data-page="risk"><i></i><span>正在检查</span></button><button class="avatar" data-page="settings">飞</button>
+    <button id="systemState" class="health" data-page="risk"><i></i><span>正在检查</span></button><button class="avatar" data-page="settings">飞</button><form action="/logout" method="post" class="logout-form"><button type="submit">退出管理</button></form>
+    {% else %}
+    <form id="globalSearch" class="global-search"><span>⌕</span><input name="q" placeholder="搜索影视作品与网盘资源" autocomplete="off"><kbd>Enter</kbd></form>
+    <nav class="top-nav"><button data-page="home" class="active">首页</button><button data-page="search">资源搜索</button><button data-page="public">在线播放</button></nav>
+    <a class="admin-login" href="/login">管理员登录</a>
+    {% endif %}
   </header>
 
   <aside class="rail">
     <button data-page="home" class="active"><span>⌂</span><b>首页</b></button>
+    {% if is_admin %}
     <button data-page="search"><span>⌕</span><b>资源搜索</b></button>
     <button data-page="following"><span>◎</span><b>我的追更</b></button>
     <button data-page="library"><span>▦</span><b>媒体库</b></button>
     <button data-page="accounts"><span>☁</span><b>网盘账号</b></button>
     <button data-page="risk"><span>◇</span><b>风险中心</b></button>
     <button data-page="settings"><span>⚙</span><b>设置</b></button>
+    {% else %}
+    <button data-page="search"><span>⌕</span><b>资源搜索</b></button>
+    <button data-page="public"><span>▣</span><b>公开目录</b></button>
+    <a class="rail-login" href="/login"><span>⚙</span><b>管理员</b></a>
+    {% endif %}
   </aside>
 
   <main id="app" class="page-area"><section class="loading-card"><span class="spinner"></span><h1>正在启动飞海网盘</h1><p>读取榜单、网盘与追更状态…</p></section></main>
 
   <nav class="mobile-nav">
-    <button data-page="home" class="active"><span>⌂</span>首页</button><button data-page="search"><span>⌕</span>搜索</button><button data-page="following"><span>◎</span>追更</button><button data-page="library"><span>▦</span>媒体库</button><button data-page="accounts"><span>☁</span>账号</button><button data-page="risk"><span>◇</span>风控</button>
+    <button data-page="home" class="active"><span>⌂</span>首页</button>{% if is_admin %}<button data-page="search"><span>⌕</span>搜索</button><button data-page="following"><span>◎</span>追更</button><button data-page="library"><span>▦</span>媒体库</button><button data-page="accounts"><span>☁</span>账号</button><button data-page="risk"><span>◇</span>风控</button>{% else %}<button data-page="search"><span>⌕</span>搜索</button><button data-page="public"><span>▶</span>在线播放</button><a href="/login"><span>⚙</span>管理员</a>{% endif %}
   </nav>
-  <div id="sessionGate" class="session-gate" hidden>
-    <form id="sessionGateForm" class="session-gate-card">
-      <div class="gate-mark"><span><i></i><i></i><i></i></span></div>
-      <small>飞海网盘 · 本次访问验证</small>
-      <h2>请输入验证密码</h2>
-      <p>每次新打开飞海网盘，都需要验证管理密码才能查看内容。</p>
-      <label><span>验证密码</span><input name="password" type="password" autocomplete="current-password" required autofocus placeholder="请输入管理密码"></label>
-      <p class="gate-error"></p>
-      <button class="primary" type="submit">验证并进入 <i>→</i></button>
-      <em>密码只在你的飞牛 NAS 内验证</em>
-    </form>
-  </div>
   <div id="modalRoot"></div><div id="toastRoot"></div>
-  <script src="/static/app.js?v=0452"></script>
+  <script src="/static/app.js?v=0470"></script>
 </body>
 </html>

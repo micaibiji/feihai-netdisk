@@ -189,20 +189,70 @@ def test_signed_session_token_expires_and_rejects_tampering():
 def test_browser_login_page_replaces_basic_auth_prompt():
     with TestClient(app) as client:
         response = client.get("/", follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"] == "/login"
+        assert response.status_code == 200
+        assert 'data-admin="false"' in response.text
+        assert "公开目录" in response.text
+        assert "管理员登录" in response.text
         unauthorized = client.get("/api/providers")
         assert unauthorized.status_code == 401
+        assert client.get("/api/overview").status_code == 401
         assert "www-authenticate" not in unauthorized.headers
         login = client.post("/login", data={"username": settings.admin_username, "password": settings.admin_password}, follow_redirects=False)
         assert login.status_code == 303
         assert login.headers["location"] == "/?verified=1"
         assert SESSION_COOKIE in login.cookies
-        assert client.get("/").status_code == 200
+        admin_page = client.get("/")
+        assert admin_page.status_code == 200
+        assert 'data-admin="true"' in admin_page.text
         assert client.post("/api/verify-password", json={"password": "wrong-password"}).status_code == 401
         verified = client.post("/api/verify-password", json={"password": settings.admin_password})
         assert verified.status_code == 200
         assert verified.json() == {"verified": True}
+
+
+def test_public_directory_is_read_only_and_cannot_escape(tmp_path: Path, monkeypatch):
+    mount = tmp_path / "mounts" / "baidu"
+    (mount / "影视" / "公开" / "子目录").mkdir(parents=True)
+    (mount / "影视" / "私密").mkdir(parents=True)
+    (mount / "影视" / "公开" / "影片.mkv").write_bytes(b"movie")
+    (mount / "影视" / "私密" / "密码.txt").write_text("secret", encoding="utf-8")
+    local_store = JobStore(tmp_path / "data" / "feihai.db")
+    local_store.initialize()
+    local_store.save_settings({"public_directories": [{
+        "provider": "baidu", "path": "/百度网盘/影视/公开", "label": "公开影视",
+    }]})
+    local_settings = replace(settings, data_dir=tmp_path / "data",
+                             native_mount_base=tmp_path / "mounts",
+                             native_mount_providers=("baidu",))
+    monkeypatch.setattr(main_module, "store", local_store)
+    monkeypatch.setattr(main_module, "settings", local_settings)
+
+    with TestClient(app) as client:
+        overview = client.get("/api/public/overview")
+        assert overview.status_code == 200
+        body = overview.json()
+        assert "providers" not in body and "settings" not in body
+        entry = body["public_directories"][0]
+        listing = client.post(f"/api/public/directories/{entry['id']}/browse", json={"path": ""})
+        assert listing.status_code == 200
+        assert {item["name"] for item in listing.json()["contents"]} == {"子目录", "影片.mkv"}
+        stream = client.get(f"/api/public/directories/{entry['id']}/stream",
+                            params={"path": "影片.mkv"})
+        assert stream.status_code == 200
+        assert stream.content == b"movie"
+        assert stream.headers["content-disposition"].startswith("inline;")
+        assert client.post(f"/api/public/directories/{entry['id']}/browse",
+                           json={"path": "../私密"}).status_code == 400
+        assert client.get(f"/api/public/directories/{entry['id']}/stream",
+                          params={"path": "../私密/密码.txt"}).status_code == 400
+        assert client.get("/api/settings/public-directories").status_code == 401
+
+
+def test_resource_cards_do_not_show_validation_placeholders():
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert "暂不可验证" not in script
+    assert "未判定失效" not in script
+    assert "resource-status" not in script
 
 
 def test_tmdb_without_key_returns_no_fake_ranking(tmp_path: Path):
@@ -279,6 +329,18 @@ def test_home_ranking_is_paginated_and_has_no_date_limit():
     assert "全量内容，不限制日期" in javascript
     assert "tmdb_ranking_window" not in javascript
     assert 'if (!state.overview)' in javascript
+
+
+def test_guest_search_result_does_not_expose_transferable_link():
+    item = {
+        "title": "庆余年",
+        "url": "https://pan.baidu.com/s/private-share",
+        "validation_reason": "分享页面可以正常访问",
+        "provider": "baidu",
+    }
+    guest_view = main_module.resource_for_viewer(item, is_admin=False)
+    assert guest_view == {"title": "庆余年", "provider": "baidu"}
+    assert main_module.resource_for_viewer(item, is_admin=True) == item
 
 
 def test_resource_visibility_requires_recognition_and_validation(tmp_path: Path):
