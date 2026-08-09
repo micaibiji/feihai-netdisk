@@ -1,15 +1,15 @@
 # 飞海网盘：飞牛 NAS 可视化安装教程
 
-本教程面向飞牛 fnOS 用户，不要求使用命令行。完成后会得到飞海网盘管理页和一个自动管理的网盘连接组件。资源搜索与链接检测连接你已经搭建的 PanSou 和检测网站，不重复安装，也不额外占用端口。
+本教程面向飞牛 fnOS 用户，不要求使用命令行。完成后会得到飞海网盘管理页，并直接使用飞牛文件管理已经登录的网盘挂载。资源搜索与链接检测连接你已经搭建的 PanSou 和检测网站，不重复安装，也不额外占用端口。
 
 ## 先看完整流程
 
 ```mermaid
 flowchart LR
     A[下载私人仓库压缩包] --> B[文件管理中解压]
-    B --> C[准备 .env 和两个数据目录]
+    B --> C[准备 .env、数据目录和飞牛网盘挂载]
     C --> D[Docker · Compose · 新增项目]
-    D --> E[等待两个容器运行]
+    D --> E[等待飞海网盘容器运行]
     E --> F[连接 PanSou 和检测网站]
     F --> G[完成网盘授权]
     G --> H[飞牛影视添加 STRM 目录]
@@ -40,7 +40,7 @@ flowchart LR
    └─ docker-compose.yml
 ```
 
-`program/data` 和 `program/strm` 都是 NAS 上的真实目录。内置网盘连接数据保存在 `program/data/gateway`，重新构建容器不会删除。
+`program/data` 和 `program/strm` 都是 NAS 上的真实目录。百度、夸克和 115 的登录状态由飞牛“文件管理 → 远程挂载”维护，飞海网盘不会再安装额外网盘网关。
 
 ## 二、下载并解压程序
 
@@ -78,7 +78,12 @@ PUBLIC_BASE_URL=http://你的NAS局域网IP:12366
 ```dotenv
 FEIHAI_DATA_PATH=./data
 FNTV_STRM_PATH=./strm
+NATIVE_MOUNT_PROVIDERS=baidu,quark
+FNOS_BAIDU_PATH=/vol02/你的百度挂载目录
+FNOS_QUARK_PATH=/vol02/你的夸克挂载目录
 ```
+
+`NATIVE_MOUNT_PROVIDERS` 只填写已经在飞牛文件管理中登录的网盘。宿主机路径由安装时按飞牛实际挂载点填写；没有挂载的网盘保持默认值，不要写入启用列表。
 
 可选功能按需填写：
 
@@ -112,14 +117,12 @@ BAIDU_REDIRECT_URI=
 点击 **创建/构建** 后保持窗口打开。正常日志顺序大致如下：
 
 ```text
-gateway Pulling
 feihai-drive Built
-feihai-gateway Started
 feihai-drive Started
 Exited: 0
 ```
 
-看到 `Exited: 0` 表示构建流程成功结束，不代表服务退出。回到 Compose 卡片应显示 **正在运行**，容器数量为 **2**。
+看到 `Exited: 0` 表示构建流程成功结束，不代表服务退出。回到 Compose 卡片应显示 **正在运行**，容器数量为 **1**。
 
 ## 五、第一次打开与验收
 
@@ -141,7 +144,7 @@ Exited: 0
 健康检查地址为 `http://你的NAS局域网IP:12366/api/health`。正常结果中应包含：
 
 ```json
-{"status":"ok","name":"飞海网盘","version":"0.4.5","database":true,"strm_writable":true}
+{"status":"ok","name":"飞海网盘","version":"0.4.6","database":true,"strm_writable":true}
 ```
 
 ## 六、网盘授权
@@ -184,7 +187,7 @@ Exited: 0
 
 ### 页面打不开
 
-- 确认 Compose 显示三个容器正在运行。
+- 确认 Compose 显示 `feihai-drive` 容器正在运行。
 - 确认 `12366` 未被其他程序占用。
 - 使用 NAS 局域网 IP，不要填写 `localhost`。
 

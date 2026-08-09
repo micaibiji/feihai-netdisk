@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path, PurePosixPath
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
@@ -23,7 +24,7 @@ from .models import (CheckerSettingsRequest, DirectoryRequest, IntakeRequest, Jo
                      ProviderCredentialRequest, ResourceValidationRequest,
                      SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
                      TmdbSettingsRequest)
-from .provider_auth import (OpenListClient, ProviderAuthError, deserialize_secret,
+from .provider_auth import (ProviderAuthError, deserialize_secret,
                             poll_115_qr, serialize_secret, start_115_qr)
 from .providers import PROVIDERS, ProviderRegistry
 from .services import (create_media_bundle, generate_strm, login_pansou, media_relative_path,
@@ -56,7 +57,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.5", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.6", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -162,7 +163,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.5", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.6", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -188,7 +189,7 @@ async def overview(_: str = Depends(require_login)):
     ui_settings.update({"tmdb_configured": bool(current_tmdb["api_key"]),
                         "tmdb_language": current_tmdb["language"],
                         "tmdb_region": current_tmdb["region"],
-                        "openlist_configured": openlist_configured(),
+                        "native_mounts": native_mount_status(),
                         **integration_public_settings()})
     return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
             "risk_events": store.list_risk_events(8), "settings": ui_settings}
@@ -200,7 +201,9 @@ def provider_states() -> list[dict]:
     for provider in PROVIDERS:
         item = records[provider.name.value]
         environment_ready = bool(os.getenv(provider.credential_env, "").strip())
-        connected = environment_ready or vault.configured(provider.name.value) or item["state"] == "connected"
+        native_ready = native_mount_available(provider.name.value)
+        connected = (native_ready or environment_ready or vault.configured(provider.name.value)
+                     or item["state"] == "connected")
         available_methods = list(provider.auth_methods)
         # Gateway driver setup is not presented as an in-page login until its QR/password
         # exchange can be completed and confirmed through this application.
@@ -209,23 +212,65 @@ def provider_states() -> list[dict]:
                 available_methods.remove(unfinished)
         if "oauth" in available_methods and not (settings.baidu_client_id and settings.baidu_redirect_uri):
             available_methods.remove("oauth")
+        auth_method = "fnos_mount" if native_ready else item["auth_method"]
+        account_mask = "飞牛原生挂载" if native_ready else item["account_mask"]
         output.append({**item, "name": provider.name.value, "label": provider.label,
                        "configured": connected, "state": "connected" if connected else item["state"],
+                       "auth_method": auth_method, "account_mask": account_mask,
+                       "native_mount": native_ready,
                        "auth_methods": available_methods,
                        "setup_required": not available_methods})
     return output
 
 
-def openlist_configured() -> bool:
-    return bool(settings.openlist_url and settings.admin_password)
+def native_mount_available(provider: str) -> bool:
+    if not settings.native_mount_enabled(provider):
+        return False
+    root = settings.native_mount_path(provider)
+    try:
+        return root.is_dir() and os.access(root, os.R_OK | os.X_OK)
+    except OSError:
+        return False
 
 
-def openlist_client() -> OpenListClient:
-    return OpenListClient(
-        settings.openlist_url,
-        "admin",
-        settings.admin_password,
-    )
+def native_mount_status() -> dict[str, bool]:
+    return {provider.name.value: native_mount_available(provider.name.value)
+            for provider in PROVIDERS}
+
+
+def list_native_directories(provider: str, label: str, requested: str) -> tuple[str, str, list[dict]]:
+    virtual_root = f"/{label}"
+    virtual_path = requested or virtual_root
+    if virtual_path == "/":
+        virtual_path = virtual_root
+    if virtual_path != virtual_root and not virtual_path.startswith(virtual_root + "/"):
+        raise HTTPException(400, "目标目录必须位于当前网盘挂载点内")
+
+    suffix = virtual_path[len(virtual_root):].lstrip("/")
+    relative = PurePosixPath(suffix) if suffix else PurePosixPath()
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise HTTPException(400, "目标目录格式不正确")
+
+    root = settings.native_mount_path(provider).resolve()
+    target = (root / Path(*relative.parts)).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(400, "目标目录超出当前网盘挂载点")
+    try:
+        entries = sorted(
+            (entry for entry in os.scandir(target) if entry.is_dir(follow_symlinks=False)),
+            key=lambda entry: entry.name.casefold(),
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, "目标目录不存在或网盘已经断开") from error
+    except (PermissionError, OSError) as error:
+        raise HTTPException(502, "飞牛远程挂载暂时无法读取，请检查网盘连接状态") from error
+    directories = [
+        {"name": entry.name,
+         "path": f"{virtual_path.rstrip('/')}/{entry.name}",
+         "modified": ""}
+        for entry in entries
+    ]
+    return virtual_root, virtual_path, directories
 
 
 def tmdb_config() -> dict[str, str]:
@@ -402,19 +447,13 @@ def save_provider_credential(provider: str, payload: ProviderCredentialRequest, 
 @app.post("/api/providers/risk-scan")
 async def risk_scan(_: str = Depends(require_login)):
     results = []
-    gateway_ok = None
-    if settings.openlist_url:
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                response = await client.get(f"{settings.openlist_url}/ping")
-                gateway_ok = response.status_code < 500
-        except Exception:
-            gateway_ok = False
     for item in provider_states():
         if not item["configured"]:
             level, state, message, action = "info", "unknown", "尚未授权，未执行访问检测", "完成授权后再检测"
-        elif item["auth_method"] == "gateway" and gateway_ok is False:
-            level, state, message, action = "warning", "gateway_unreachable", "本机网盘网关无法访问", "暂停自动任务并保留原来源"
+        elif item.get("native_mount") and not native_mount_available(item["name"]):
+            level, state, message, action = "warning", "mount_unavailable", "飞牛远程挂载无法访问", "请在文件管理中重新连接网盘"
+        elif item.get("native_mount"):
+            level, state, message, action = "safe", "normal", "飞牛远程挂载可读，连接正常", "保持低频访问"
         else:
             level, state, message, action = "safe", "normal", "凭证存在，未发现本地异常", "保持低频访问"
         store.update_provider(item["name"], risk_status=state)
@@ -594,7 +633,7 @@ def get_app_settings(_: str = Depends(require_login)):
     tmdb = tmdb_config()
     values.update({"tmdb_configured": bool(tmdb["api_key"]), "tmdb_language": tmdb["language"],
                    "tmdb_region": tmdb["region"],
-                   "openlist_configured": openlist_configured(),
+                   "native_mounts": native_mount_status(),
                    **integration_public_settings()})
     return values
 
@@ -735,20 +774,13 @@ async def provider_directories(provider: str, payload: DirectoryRequest, _: str 
     account = next(item for item in provider_states() if item["name"] == provider)
     if not account["configured"]:
         raise HTTPException(409, f"请先授权 {account['label']}")
-    if not openlist_configured():
-        raise HTTPException(503, "网盘连接服务尚未就绪，请稍后重试")
-    mount_root = f"/{account['label']}"
-    requested = payload.path or mount_root
-    if requested == "/":
-        requested = mount_root
-    if requested != mount_root and not requested.startswith(mount_root + "/"):
-        raise HTTPException(400, "目标目录必须位于当前网盘挂载点内")
-    try:
-        directories = await openlist_client().list_directories(requested)
-    except (ProviderAuthError, httpx.HTTPError) as error:
-        raise HTTPException(502, "读取网盘目录失败，内部连接服务暂时不可用") from error
+    if not native_mount_available(provider):
+        raise HTTPException(503, "飞牛远程挂载尚未接入，请先在飞牛文件管理中挂载网盘")
+    mount_root, requested, directories = list_native_directories(
+        provider, account["label"], payload.path or ""
+    )
     return {"provider": provider, "root": mount_root, "path": requested,
-            "directories": directories}
+            "directories": directories, "connection": "fnos_mount"}
 
 
 @app.post("/api/notify")

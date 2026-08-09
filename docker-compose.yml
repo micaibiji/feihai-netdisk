@@ -6,26 +6,17 @@ services:
     env_file:
       - .env
     environment:
-      OPENLIST_URL: http://gateway:5244
+      NATIVE_MOUNT_BASE: /mnt/netdisk
+      NATIVE_MOUNT_PROVIDERS: ${NATIVE_MOUNT_PROVIDERS:-}
     ports:
       - "12366:12366"
     volumes:
       - ./app:/app/app:ro
       - ${FEIHAI_DATA_PATH:-./data}:/app/data
       - ${FNTV_STRM_PATH:-./strm}:/app/strm
+      - ${FNOS_115_PATH:-./netdisk/115}:/mnt/netdisk/115:rslave
+      - ${FNOS_BAIDU_PATH:-./netdisk/baidu}:/mnt/netdisk/baidu:rslave
+      - ${FNOS_QUARK_PATH:-./netdisk/quark}:/mnt/netdisk/quark:rslave
+      - ${FNOS_MOBILE_PATH:-./netdisk/china_mobile}:/mnt/netdisk/china_mobile:rslave
     security_opt:
       - no-new-privileges:true
-    depends_on:
-      - gateway
-
-  gateway:
-    image: openlistteam/openlist:latest
-    container_name: feihai-gateway
-    restart: unless-stopped
-    user: "0:0"
-    environment:
-      UMASK: "022"
-      TZ: Asia/Shanghai
-      OPENLIST_ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
-    volumes:
-      - ${FEIHAI_DATA_PATH:-./data}/gateway:/opt/openlist/data

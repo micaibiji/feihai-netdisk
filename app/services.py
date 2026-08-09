@@ -387,11 +387,12 @@ async def search_resources(settings: Settings, query: str, *, base_url: str | No
 
 
 def provider_auth_start(settings: Settings, provider: str) -> dict[str, Any]:
+    if settings.native_mount_enabled(provider):
+        return {"ready": False, "mode": "fnos_mount", "url": "",
+                "message": "此网盘已由飞牛文件管理原生挂载，无需再次登录"}
     if provider == "baidu" and settings.baidu_client_id and settings.baidu_redirect_uri:
         query = urlencode({"response_type": "code", "client_id": settings.baidu_client_id, "redirect_uri": settings.baidu_redirect_uri, "scope": "basic,netdisk", "display": "popup", "qrcode": "1"})
         return {"ready": True, "mode": "oauth", "url": f"https://openapi.baidu.com/oauth/2.0/authorize?{query}", "message": "请在百度官方页面授权"}
-    if provider in {"115", "quark", "china_mobile"} and settings.openlist_url:
-        return {"ready": True, "mode": "gateway", "url": "", "message": "正在准备页面内登录"}
     hints = {
         "115": "115 页面内登录尚未就绪",
         "baidu": "需要填写百度开放平台 Client ID 与回调地址",

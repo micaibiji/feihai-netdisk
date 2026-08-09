@@ -1,5 +1,7 @@
 from pathlib import Path
 import asyncio
+from dataclasses import replace
+import importlib
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +18,8 @@ from app.services import (RANKING_PAGE_SIZE, _discover_tmdb_media, _find_urls,
 from app.storage import JobStore
 from app.validation import should_show_resource, validate_share_urls
 from app.vault import CredentialVault
+
+main_module = importlib.import_module("app.main")
 
 
 def test_detect_supported_providers():
@@ -349,3 +353,30 @@ def test_compose_only_publishes_the_feihai_port():
     assert '"8888:8888"' not in compose
     assert "feihai-pansou" not in compose
     assert "ghcr.io/fish2018/pansou" not in compose
+
+
+def test_compose_uses_fnos_native_mounts_without_openlist():
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    assert "FNOS_BAIDU_PATH" in compose
+    assert "FNOS_QUARK_PATH" in compose
+    assert "NATIVE_MOUNT_PROVIDERS" in compose
+    assert "openlistteam/openlist" not in compose.lower()
+    assert "feihai-gateway" not in compose
+
+
+def test_native_mount_directory_listing(tmp_path: Path, monkeypatch):
+    mount = tmp_path / "baidu"
+    (mount / "影视" / "电视剧").mkdir(parents=True)
+    (mount / "普通文件.txt").write_text("ignored", encoding="utf-8")
+    native_settings = replace(
+        settings,
+        native_mount_base=tmp_path,
+        native_mount_providers=("baidu",),
+    )
+    monkeypatch.setattr(main_module, "settings", native_settings)
+    assert main_module.native_mount_available("baidu") is True
+    root, current, directories = main_module.list_native_directories(
+        "baidu", "百度网盘", "/百度网盘"
+    )
+    assert root == current == "/百度网盘"
+    assert directories == [{"name": "影视", "path": "/百度网盘/影视", "modified": ""}]

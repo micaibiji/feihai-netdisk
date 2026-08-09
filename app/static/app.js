@@ -376,12 +376,22 @@ function library() {
   }</div></section>`;
 }
 function accounts() {
-  return `<section class="accounts-intro"><div><h2>网盘授权、扫码与 Token 登录</h2><p>不会强制使用一种方式；Token、Cookie 和授权信息都只加密保存在飞牛 NAS。</p></div><span><i></i>${state.overview.providers.filter((x) => x.configured).length} / 4 已连接</span></section><div class="accounts-grid">${state.overview.providers
+  return `<section class="accounts-intro"><div><h2>飞牛挂载、扫码与 Token 登录</h2><p>优先使用飞牛文件管理的原生网盘挂载；Token、Cookie 和授权信息只作为备用方式。</p></div><span><i></i>${state.overview.providers.filter((x) => x.configured).length} / 4 已连接</span></section><div class="accounts-grid">${state.overview.providers
     .map((x) => {
       const m = pm[x.name],
         ok = x.configured,
         ready = (x.auth_methods || []).length > 0;
-      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${ok && x.auth_method === "token" ? "Token / Cookie" : ready ? authMethodLabel(x.auth_methods[0]) : "Token / Cookie"}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer><button ${ready ? `data-auth="${x.name}"` : `data-auth-guide="${x.name}"`}>${ready ? "扫码 / 官方授权" : "授权说明"}</button><button class="primary" data-token-auth="${x.name}">${ok ? "更新 Token" : "Token 登录"}</button></footer></article>`;
+      const method = x.native_mount
+        ? "飞牛原生挂载"
+        : ok && x.auth_method === "token"
+          ? "Token / Cookie"
+          : ready
+            ? authMethodLabel(x.auth_methods[0])
+            : "Token / Cookie";
+      const authButton = x.native_mount
+        ? `<button data-auth-guide="${x.name}">飞牛挂载详情</button>`
+        : `<button ${ready ? `data-auth="${x.name}"` : `data-auth-guide="${x.name}"`}>${ready ? "扫码 / 官方授权" : "授权说明"}</button>`;
+      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${method}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer>${authButton}<button class="primary" data-token-auth="${x.name}">${x.native_mount ? "备用 Token" : ok ? "更新 Token" : "Token 登录"}</button></footer></article>`;
     })
     .join(
       "",
@@ -395,6 +405,7 @@ function authMethodLabel(x) {
       gateway_qr: "页面内二维码",
       gateway_password: "账号密码登录",
       token: "Token / Cookie",
+      fnos_mount: "飞牛原生挂载",
     }[x] || x
   );
 }
@@ -455,6 +466,14 @@ function showTmdbGuide() {
 }
 
 function showProviderAuthGuide(provider) {
+  const account = state.overview.providers.find((item) => item.name === provider);
+  if (account?.native_mount) {
+    const label = pm[provider]?.label || account.label;
+    modalRoot.innerHTML = `<div class="modal-backdrop"><section class="form-modal provider-auth-guide"><button class="modal-close">×</button><small>已安全接入 · 飞牛原生挂载</small><h2>${esc(label)}已连接</h2><p>飞海网盘直接使用飞牛文件管理已经登录的网盘挂载，不需要再次扫码，也不需要填写账号密码。</p><ol><li>登录状态由飞牛文件管理负责维护。</li><li>入库时可以逐级选择这个网盘里的目标文件夹。</li><li>挂载断开时，飞海网盘会停止对应任务并提示重新连接。</li></ol><aside>飞海网盘只映射网盘目录，不安装 OpenList，也不会新增管理端口。</aside><div class="guide-actions"><button type="button" class="primary guide-close">知道了</button></div></section></div>`;
+    modalRoot.querySelector(".modal-close").onclick = close;
+    modalRoot.querySelector(".guide-close").onclick = close;
+    return;
+  }
   const guides = {
     baidu: {
       status: "可安全接入 · 需要一次性准备",

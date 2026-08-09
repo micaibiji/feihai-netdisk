@@ -23,7 +23,14 @@ class Settings:
     public_base_url: str = ""
     baidu_client_id: str = ""
     baidu_redirect_uri: str = ""
-    openlist_url: str = ""
+    native_mount_base: Path = Path("/mnt/netdisk")
+    native_mount_providers: tuple[str, ...] = ()
+
+    def native_mount_path(self, provider: str) -> Path:
+        return self.native_mount_base / provider
+
+    def native_mount_enabled(self, provider: str) -> bool:
+        return provider in self.native_mount_providers
 
     @property
     def database_path(self) -> Path:
@@ -54,5 +61,10 @@ def get_settings() -> Settings:
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").rstrip("/"),
         baidu_client_id=os.getenv("BAIDU_CLIENT_ID", ""),
         baidu_redirect_uri=os.getenv("BAIDU_REDIRECT_URI", ""),
-        openlist_url=os.getenv("OPENLIST_URL", "").rstrip("/"),
+        native_mount_base=Path(os.getenv("NATIVE_MOUNT_BASE", "/mnt/netdisk")).resolve(),
+        native_mount_providers=tuple(
+            item.strip()
+            for item in os.getenv("NATIVE_MOUNT_PROVIDERS", "").split(",")
+            if item.strip()
+        ),
     )

@@ -12,7 +12,7 @@ class ProviderAuthError(RuntimeError):
 
 
 async def start_115_qr() -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create a 115 QR session using the endpoints documented by OpenList."""
+    """Create a 115 QR session through the official 115 QR endpoints."""
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         response = await client.get("https://qrcodeapi.115.com/api/1.0/web/1.0/token/")
         response.raise_for_status()
@@ -80,56 +80,6 @@ async def poll_115_qr(secret: dict[str, Any]) -> tuple[str, str, str]:
         raise ProviderAuthError("扫码已确认，但 115 未返回登录信息")
     credential = "; ".join(f"{key}={value}" for key, value in login_data.items())
     return "succeeded", "授权成功", credential
-
-
-class OpenListClient:
-    def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url.rstrip("/")
-        self.username = username
-        self.password = password
-
-    async def token(self) -> str:
-        if not self.base_url or not self.username or not self.password:
-            raise ProviderAuthError("请先在设置中连接本机 OpenList")
-        async with httpx.AsyncClient(timeout=12) as client:
-            response = await client.post(
-                f"{self.base_url}/api/auth/login",
-                json={"username": self.username, "password": self.password},
-            )
-            response.raise_for_status()
-            body = response.json()
-        if body.get("code") != 200 or not (body.get("data") or {}).get("token"):
-            raise ProviderAuthError(body.get("message") or "OpenList 登录失败")
-        return str(body["data"]["token"])
-
-    async def list_directories(self, path: str) -> list[dict[str, Any]]:
-        token = await self.token()
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{self.base_url}/api/fs/list",
-                headers={"Authorization": token},
-                json={"path": path or "/", "password": "", "page": 1, "per_page": 0,
-                      "refresh": False},
-            )
-            response.raise_for_status()
-            body = response.json()
-        if body.get("code") != 200:
-            raise ProviderAuthError(body.get("message") or "读取目录失败")
-        content = (body.get("data") or {}).get("content") or []
-        return [
-            {"name": item.get("name", ""), "path": _join_path(path, item.get("name", "")),
-             "modified": item.get("modified", "")}
-            for item in content if item.get("is_dir")
-        ]
-
-    async def test(self) -> dict[str, Any]:
-        token = await self.token()
-        return {"connected": bool(token), "url": self.base_url}
-
-
-def _join_path(parent: str, name: str) -> str:
-    parent = "/" + parent.strip("/") if parent.strip("/") else ""
-    return f"{parent}/{name}" or "/"
 
 
 def serialize_secret(value: dict[str, Any]) -> str:
