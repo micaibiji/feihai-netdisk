@@ -159,7 +159,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.2",
+        "version": "1.0.3",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
     }

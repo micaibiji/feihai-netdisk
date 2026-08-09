@@ -179,7 +179,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.2"
+    assert health["version"] == "1.0.3"
     assert health["port_policy"] == "single-port"
     assert client.get("/api/admin/overview").status_code == 401
     response = client.post(
@@ -214,3 +214,11 @@ def test_compose_exposes_only_product_port() -> None:
 def test_frontend_has_only_one_delegated_click_handler() -> None:
     script = Path("app/static/app.js").read_text(encoding="utf-8")
     assert script.count("document.addEventListener('click'") == 1
+
+
+def test_mobile_layout_has_compact_navigation_and_filters() -> None:
+    css = Path("app/static/app.css").read_text(encoding="utf-8")
+    assert "@media(max-width:600px)" in css
+    assert "grid-template-columns:repeat(auto-fit,minmax(92px,1fr))" in css
+    assert ".resource-filters strong{flex:0 0 100%" in css
+    assert ".resource-grid .resource-actions{grid-template-columns:repeat(2,minmax(0,1fr))" in css
