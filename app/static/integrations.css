@@ -1,0 +1,25 @@
+.search-progress {
+  flex-wrap: wrap;
+}
+
+.search-progress small {
+  width: 100%;
+  color: var(--muted);
+}
+
+.search-progress.service-error {
+  border-color: #f0c9c3;
+  background: #fff8f6;
+}
+
+.search-progress.service-error b {
+  color: var(--red);
+}
+
+.account-card footer button {
+  flex: 1;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--white);
+}

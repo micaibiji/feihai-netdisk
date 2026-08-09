@@ -10,10 +10,11 @@ from app.models import ProviderName
 from app.provider_auth import parse_115_qr_state
 from app.providers import ProviderRegistry
 from app.services import (RANKING_PAGE_SIZE, _discover_tmdb_media, _find_urls,
-                          create_media_bundle, generate_strm,
+                          _find_contexts, create_media_bundle, decode_pansou_json, generate_strm,
                           media_folder, media_relative_path, parse_episode, safe_name,
                           trending_tmdb)
 from app.storage import JobStore
+from app.validation import validate_share_urls
 from app.vault import CredentialVault
 
 
@@ -65,6 +66,67 @@ def test_find_urls_in_search_payload():
         ]
     }
     assert _find_urls(payload) == ["https://115.com/s/abc", "https://pan.baidu.com/s/xyz"]
+
+
+def test_nested_pansou_payload_uses_resource_context_instead_of_success():
+    payload = {
+        "success": True,
+        "results": [{
+            "channel": "netdisk",
+            "content": "汪汪队立大功大电影3 4K https://pan.baidu.com/s/example",
+        }],
+    }
+    contexts = _find_contexts(payload, "汪汪队立大功大电影3")
+    assert contexts == [(
+        "https://pan.baidu.com/s/example",
+        "汪汪队立大功大电影3 4K",
+        "netdisk",
+    )]
+
+
+def test_pansou_json_tolerates_one_malformed_plugin_title():
+    result = decode_pansou_json(b'{"results":[{"content":"ok\xe6\xaf"}]}')
+    assert result["results"][0]["content"].startswith("ok")
+
+
+def test_external_checker_maps_valid_invalid_and_pending(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "valid_links": ["https://115.com/s/ok"],
+                "invalid_links": ["https://pan.baidu.com/s/gone"],
+                "pending_links": ["https://pan.quark.cn/s/wait"],
+            }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json, headers):
+            assert url == "http://checker.local/api/v1/links/check"
+            assert json["selectedPlatforms"] == ["pan115", "baidu", "quark"]
+            assert headers == {"Authorization": "Bearer secret"}
+            return Response()
+
+    monkeypatch.setattr("app.validation.httpx.AsyncClient", Client)
+    urls = [
+        "https://115.com/s/ok",
+        "https://pan.baidu.com/s/gone",
+        "https://pan.quark.cn/s/wait",
+    ]
+    result = asyncio.run(validate_share_urls(
+        urls, base_url="http://checker.local", token="secret",
+    ))
+    assert [result[url].state for url in urls] == ["valid", "invalid", "unverifiable"]
 
 
 def test_unified_naming_rules():
@@ -245,14 +307,24 @@ def test_settings_hide_internal_gateway_and_link_tmdb_guide():
     assert 'id="openlistForm"' not in javascript
     assert "https://www.themoviedb.org/settings/api" in javascript
     assert "填写教程" in javascript
+    assert 'id="pansouForm"' in javascript
+    assert 'id="checkerForm"' in javascript
+    assert "/api/v1/links/check" in javascript
 
 
 def test_unavailable_provider_login_has_honest_in_page_guidance():
     javascript = Path("app/static/app.js").read_text(encoding="utf-8")
-    assert "查看授权说明" in javascript
+    assert "授权说明" in javascript
     assert "夸克网页版可以扫码" in javascript
     assert "中国移动开放平台面向申请接入的应用" in javascript
-    assert "把凭据交给未知中转" in javascript
+    assert "Token、Cookie 与扫码凭证都只保存在本机" in javascript
+
+
+def test_all_four_providers_offer_local_encrypted_token_login():
+    javascript = Path("app/static/app.js").read_text(encoding="utf-8")
+    assert 'data-token-auth="${x.name}"' in javascript
+    assert "Token、Cookie 与扫码凭证都只保存在本机" in javascript
+    assert "/credential" in javascript
 
 
 def test_compose_only_publishes_the_feihai_port():
@@ -260,3 +332,5 @@ def test_compose_only_publishes_the_feihai_port():
     assert '"12366:12366"' in compose
     assert '"5244:5244"' not in compose
     assert '"8888:8888"' not in compose
+    assert "feihai-pansou" not in compose
+    assert "ghcr.io/fish2018/pansou" not in compose

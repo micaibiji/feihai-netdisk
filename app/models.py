@@ -86,6 +86,25 @@ class TmdbSettingsRequest(BaseModel):
     region: str = Field(default="CN", pattern=r"^[A-Z]{2}$")
 
 
+class PansouSettingsRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500, pattern=r"^https?://")
+    api_path: str = Field(default="/api/search", min_length=2, max_length=200, pattern=r"^/")
+    source: str = Field(default="all", pattern=r"^(all|tg|plugin)$")
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=500)
+    token: str = Field(default="", max_length=4000)
+    clear_credentials: bool = False
+
+
+class CheckerSettingsRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500, pattern=r"^https?://")
+    api_path: str = Field(default="/api/v1/links/check", min_length=2, max_length=200, pattern=r"^/")
+    token: str = Field(default="", max_length=4000)
+    timeout_seconds: int = Field(default=35, ge=5, le=120)
+    cache_minutes: int = Field(default=120, ge=0, le=10080)
+    clear_token: bool = False
+
+
 class ResourceValidationRequest(BaseModel):
     share_url: HttpUrl
     force: bool = False

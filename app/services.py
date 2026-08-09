@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -241,23 +242,87 @@ def _find_urls(value: Any) -> list[str]:
 
 def _find_contexts(value: Any, query: str) -> list[tuple[str, str, str]]:
     output: list[tuple[str, str, str]] = []
-    if isinstance(value, dict):
-        blob = " ".join(str(value.get(key, "")) for key in ("title", "name", "content", "message"))
-        source = str(value.get("source") or value.get("channel") or "telegram/netdisk")
-        for url in _find_urls(value):
-            output.append((url, blob.strip() or query, source))
-        return output
-    for url in _find_urls(value):
-        output.append((url, query, "telegram/netdisk"))
+
+    def walk(node: Any, inherited_title: str, inherited_source: str) -> None:
+        if isinstance(node, dict):
+            pieces = [str(node.get(key, "")).strip() for key in ("title", "name", "content", "message")]
+            pieces = [piece for piece in pieces if piece and piece.lower() not in {"success", "ok", "true", "result"}]
+            title = " ".join(dict.fromkeys(pieces)) or inherited_title
+            source = str(node.get("source") or node.get("channel") or node.get("plugin") or inherited_source)
+            for child in node.values():
+                walk(child, title, source)
+            return
+        if isinstance(node, list):
+            for child in node:
+                walk(child, inherited_title, inherited_source)
+            return
+        if not isinstance(node, str):
+            return
+        display_title = URL_PATTERN.sub("", inherited_title).strip(" -|，,。") or query
+        for url in URL_PATTERN.findall(node):
+            output.append((url, display_title, inherited_source))
+
+    walk(value, query, "telegram/netdisk")
     return output
 
 
-async def search_resources(settings: Settings, query: str) -> list[dict[str, Any]]:
-    payload = {"kw": query, "src": "all", "res": "all", "cloud_types": ["115", "baidu", "quark", "mobile"]}
-    async with httpx.AsyncClient(timeout=35) as client:
-        response = await client.post(f"{settings.pansou_base_url}/api/search", json=payload)
+def normalize_search_title(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+
+
+def pansou_headers(token: str = "") -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def decode_pansou_json(content: bytes) -> dict[str, Any]:
+    """Keep one malformed plugin title from breaking the complete PanSou result."""
+    body = json.loads(content.decode("utf-8", errors="replace"))
+    if not isinstance(body, dict):
+        raise ValueError("Pansou 返回了无法识别的结果格式")
+    return body
+
+
+async def login_pansou(base_url: str, username: str, password: str) -> str:
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"{base_url.rstrip('/')}/api/auth/login",
+            json={"username": username, "password": password},
+        )
         response.raise_for_status()
-        body = response.json()
+        body = decode_pansou_json(response.content)
+    token = str(body.get("token") or body.get("data", {}).get("token") or "")
+    if not token:
+        raise ValueError("Pansou 登录成功但没有返回 Token")
+    return token
+
+
+async def test_pansou_connection(base_url: str, token: str = "") -> dict[str, Any]:
+    base_url = base_url.rstrip("/")
+    headers = pansou_headers(token)
+    async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers=headers) as client:
+        for path in ("/api/health", "/health", "/"):
+            response = await client.get(f"{base_url}{path}")
+            if response.status_code in {401, 403}:
+                response.raise_for_status()
+            if response.status_code < 500 and response.status_code != 404:
+                return {"connected": True, "endpoint": path, "status_code": response.status_code}
+    raise ValueError("无法连接 Pansou，请检查地址、网络和鉴权信息")
+
+
+async def search_resources(settings: Settings, query: str, *, base_url: str | None = None,
+                           api_path: str = "/api/search", source: str = "all",
+                           token: str = "") -> list[dict[str, Any]]:
+    effective_base_url = (settings.pansou_base_url if base_url is None else base_url).rstrip("/")
+    if not effective_base_url:
+        raise ValueError("尚未在设置中连接自己的 Pansou")
+    payload = {"kw": query, "src": source, "res": "all", "cloud_types": ["115", "baidu", "quark", "mobile"]}
+    async with httpx.AsyncClient(timeout=35) as client:
+        response = await client.post(
+            f"{effective_base_url}{api_path}", json=payload, headers=pansou_headers(token),
+        )
+        response.raise_for_status()
+        body = decode_pansou_json(response.content)
     candidates = body.get("results", body)
     dedup: dict[str, dict[str, Any]] = {}
     for url, title, source in _find_contexts(candidates, query):
@@ -268,7 +333,14 @@ async def search_resources(settings: Settings, query: str) -> list[dict[str, Any
             continue
         season, episode = parse_episode(title)
         generic_title = title.strip().lower() in {"", "success", "ok", "true", "result"}
-        recognized = not generic_title and query.strip().lower() in title.lower()
+        if generic_title:
+            title = query.strip()
+        normalized_query = normalize_search_title(query)
+        normalized_candidate = normalize_search_title(title)
+        recognized = bool(
+            normalized_query and normalized_candidate
+            and (normalized_query in normalized_candidate or normalized_candidate in normalized_query)
+        )
         fingerprint = hashlib.sha256(clean_url.encode()).hexdigest()
         dedup[fingerprint] = {
             "provider": provider.name.value, "provider_label": provider.label, "title": title,

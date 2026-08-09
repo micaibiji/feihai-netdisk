@@ -18,17 +18,20 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
-from .models import (DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
+from .models import (CheckerSettingsRequest, DirectoryRequest, IntakeRequest, JobStatus, NotifyRequest,
+                     PansouSettingsRequest,
                      ProviderCredentialRequest, ResourceValidationRequest,
                      SettingsRequest, StrmRequest, SubscriptionRequest, SubscriptionSourceRequest,
                      TmdbSettingsRequest)
 from .provider_auth import (OpenListClient, ProviderAuthError, deserialize_secret,
                             poll_115_qr, serialize_secret, start_115_qr)
 from .providers import PROVIDERS, ProviderRegistry
-from .services import (create_media_bundle, generate_strm, media_relative_path, provider_auth_start,
-                       search_resources, search_tmdb, send_notifications, trending_tmdb)
+from .services import (create_media_bundle, generate_strm, login_pansou, media_relative_path,
+                       provider_auth_start, search_resources, search_tmdb, send_notifications,
+                       test_pansou_connection, trending_tmdb)
 from .storage import JobStore
-from .validation import validate_share_url
+from .validation import (ExternalValidatorError, test_checker_connection,
+                         validate_share_urls)
 from .vault import CredentialVault
 
 settings = get_settings()
@@ -53,7 +56,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.2", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.3", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -64,11 +67,12 @@ async def subscription_worker() -> None:
             if not subscription["enabled"]:
                 continue
             try:
-                results = await search_resources(settings, subscription["keyword"])
+                results = await search_from_pansou(subscription["keyword"])
+                checks = await check_external_links([item["url"] for item in results[:30]])
                 new_count = 0
                 for item in results[:30]:
                     record = store.upsert_resource(item)
-                    validation = await validate_share_url(item["url"])
+                    validation = checks[item["url"]]
                     store.update_resource_validation(
                         record["fingerprint"], state=validation.state, reason=validation.reason,
                         checked_at=validation.checked_at, recheck_after=validation.recheck_after,
@@ -158,7 +162,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.2", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.3", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -184,7 +188,8 @@ async def overview(_: str = Depends(require_login)):
     ui_settings.update({"tmdb_configured": bool(current_tmdb["api_key"]),
                         "tmdb_language": current_tmdb["language"],
                         "tmdb_region": current_tmdb["region"],
-                        "openlist_configured": openlist_configured()})
+                        "openlist_configured": openlist_configured(),
+                        **integration_public_settings()})
     return {"ranking": ranking, "providers": accounts, "subscriptions": subscriptions, "jobs": jobs,
             "risk_events": store.list_risk_events(8), "settings": ui_settings}
 
@@ -230,6 +235,85 @@ def tmdb_config() -> dict[str, str]:
         "language": str(stored.get("tmdb_language") or "zh-CN"),
         "region": str(stored.get("tmdb_region") or "CN"),
     }
+
+
+def pansou_config() -> dict[str, str | bool]:
+    stored = store.load_settings()
+    # External integrations are configured explicitly from the web UI.
+    base_url = str(stored.get("pansou_base_url") or "").rstrip("/")
+    username = vault.load_secret("pansou_username")
+    password = vault.load_secret("pansou_password")
+    token = vault.load_secret("pansou_token")
+    return {
+        "base_url": base_url,
+        "api_path": str(stored.get("pansou_api_path") or "/api/search"),
+        "source": str(stored.get("pansou_source") or "all"),
+        "username": username,
+        "password": password,
+        "token": token,
+        "configured": bool(base_url),
+        "auth_configured": bool(token or (username and password)),
+    }
+
+
+def checker_config() -> dict[str, str | int | bool]:
+    stored = store.load_settings()
+    base_url = str(stored.get("checker_base_url") or "").rstrip("/")
+    token = vault.load_secret("checker_token")
+    return {
+        "base_url": base_url,
+        "api_path": str(stored.get("checker_api_path") or "/api/v1/links/check"),
+        "token": token,
+        "timeout_seconds": int(stored.get("checker_timeout_seconds") or 35),
+        "cache_minutes": int(stored.get("checker_cache_minutes") or 120),
+        "configured": bool(base_url),
+        "auth_configured": bool(token),
+    }
+
+
+def integration_public_settings() -> dict[str, object]:
+    pansou = pansou_config()
+    checker = checker_config()
+    return {
+        "pansou_base_url": pansou["base_url"],
+        "pansou_api_path": pansou["api_path"],
+        "pansou_source": pansou["source"],
+        "pansou_configured": pansou["configured"],
+        "pansou_auth_configured": pansou["auth_configured"],
+        "checker_base_url": checker["base_url"],
+        "checker_api_path": checker["api_path"],
+        "checker_timeout_seconds": checker["timeout_seconds"],
+        "checker_cache_minutes": checker["cache_minutes"],
+        "checker_configured": checker["configured"],
+        "checker_auth_configured": checker["auth_configured"],
+    }
+
+
+async def search_from_pansou(query: str) -> list[dict]:
+    config = pansou_config()
+    try:
+        return await search_resources(
+            settings, query, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
+            source=str(config["source"]), token=str(config["token"]),
+        )
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 401 or not (config["username"] and config["password"]):
+            raise
+        token = await login_pansou(str(config["base_url"]), str(config["username"]), str(config["password"]))
+        vault.save_secret("pansou_token", token)
+        return await search_resources(
+            settings, query, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
+            source=str(config["source"]), token=token,
+        )
+
+
+async def check_external_links(urls: list[str]):
+    config = checker_config()
+    return await validate_share_urls(
+        urls, base_url=str(config["base_url"]), api_path=str(config["api_path"]),
+        token=str(config["token"]), timeout_seconds=int(config["timeout_seconds"]),
+        cache_minutes=int(config["cache_minutes"]),
+    )
 
 
 async def current_trending(media_type: str = "all", page: int = 1) -> dict:
@@ -310,7 +394,8 @@ def save_provider_credential(provider: str, payload: ProviderCredentialRequest, 
     if provider not in {item.name.value for item in PROVIDERS}:
         raise HTTPException(404, "未知网盘")
     vault.save(provider, payload.credential)
-    return store.update_provider(provider, state="connected", account_mask=payload.account_mask, risk_status="normal", auth_method="local_encrypted")
+    return store.update_provider(provider, state="connected", account_mask=payload.account_mask,
+                                 risk_status="unknown", auth_method="token")
 
 
 @app.post("/api/providers/risk-scan")
@@ -358,7 +443,10 @@ async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
                             status=JobStatus.WAITING_AUTH.value,
                             detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
                                     "auto_organize": payload.auto_organize, "message": f"请先授权 {provider.label}"})
-    validation = await validate_share_url(str(payload.share_url))
+    try:
+        validation = (await check_external_links([str(payload.share_url)]))[str(payload.share_url)]
+    except ExternalValidatorError as error:
+        raise HTTPException(503, str(error)) from error
     if validation.state != "valid":
         raise HTTPException(409, f"入库前验证未通过：{validation.reason}")
     job = store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
@@ -395,18 +483,23 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
     try:
         config = tmdb_config()
         discovered, works = await asyncio.gather(
-            search_resources(settings, q),
+            search_from_pansou(q),
             search_tmdb(settings, q, api_key=config["api_key"], language=config["language"],
                         region=config["region"]),
         )
-        semaphore = asyncio.Semaphore(4)
+        records = {item["url"]: store.upsert_resource(item) for item in discovered[:100]}
+        try:
+            validations = await check_external_links(list(records))
+            detector = {"status": "connected", "message": "你的检测网站已完成检查"}
+        except ExternalValidatorError as error:
+            validations = {}
+            detector = {"status": "unavailable", "message": str(error)}
 
         async def check(item: dict) -> tuple[dict, str]:
-            record = store.upsert_resource(item)
-            if item["recognition_state"] != "recognized":
-                return item, "pending_recognition"
-            async with semaphore:
-                validation = await validate_share_url(item["url"])
+            record = records[item["url"]]
+            validation = validations.get(item["url"])
+            if validation is None:
+                return item, "detector_unavailable"
             store.update_resource_validation(
                 record["fingerprint"], state=validation.state, reason=validation.reason,
                 checked_at=validation.checked_at, recheck_after=validation.recheck_after,
@@ -415,13 +508,15 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
             item["validation_reason"] = validation.reason
             return item, validation.state
 
-        checked = await asyncio.gather(*(check(item) for item in discovered[:40]))
+        checked = await asyncio.gather(*(check(item) for item in discovered[:100]))
         visible = [item for item, state in checked if state == "valid"]
         counts: dict[str, int] = {"discovered": len(discovered), "valid": 0, "invalid": 0,
-                                  "unverifiable": 0, "pending_recognition": 0}
+                                  "unverifiable": 0, "pending_recognition": 0,
+                                  "detector_unavailable": 0}
         for _, validation_state in checked:
             counts[validation_state] = counts.get(validation_state, 0) + 1
-        return {"works": works, "resources": visible, "progress": counts}
+        return {"works": works, "resources": visible, "progress": counts,
+                "detector": detector}
     except Exception as error:
         raise HTTPException(502, f"资源搜索失败：{error}") from error
 
@@ -429,9 +524,9 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
 @app.post("/api/resources/validate")
 async def validate_resource(payload: ResourceValidationRequest, _: str = Depends(require_login)):
     try:
-        result = await validate_share_url(str(payload.share_url))
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
+        result = (await check_external_links([str(payload.share_url)]))[str(payload.share_url)]
+    except (ValueError, ExternalValidatorError) as error:
+        raise HTTPException(503, str(error)) from error
     return result.__dict__
 
 
@@ -485,7 +580,8 @@ def get_app_settings(_: str = Depends(require_login)):
     tmdb = tmdb_config()
     values.update({"tmdb_configured": bool(tmdb["api_key"]), "tmdb_language": tmdb["language"],
                    "tmdb_region": tmdb["region"],
-                   "openlist_configured": openlist_configured()})
+                   "openlist_configured": openlist_configured(),
+                   **integration_public_settings()})
     return values
 
 
@@ -493,6 +589,96 @@ def get_app_settings(_: str = Depends(require_login)):
 def update_app_settings(payload: SettingsRequest, _: str = Depends(require_login)):
     store.save_settings(payload.model_dump())
     return {"saved": True, "settings": store.load_settings()}
+
+
+@app.get("/api/settings/integrations")
+def get_integration_settings(_: str = Depends(require_login)):
+    return integration_public_settings()
+
+
+async def _resolve_pansou_token(base_url: str, username: str, password: str, token: str) -> str:
+    if token:
+        return token
+    if username and password:
+        return await login_pansou(base_url, username, password)
+    return ""
+
+
+@app.put("/api/settings/pansou")
+async def update_pansou_settings(payload: PansouSettingsRequest, _: str = Depends(require_login)):
+    current = pansou_config()
+    if payload.clear_credentials:
+        for key in ("pansou_username", "pansou_password", "pansou_token"):
+            vault.delete_secret(key)
+        current.update({"username": "", "password": "", "token": ""})
+    username = payload.username or str(current["username"])
+    password = payload.password or str(current["password"])
+    token = payload.token or str(current["token"])
+    try:
+        token = await _resolve_pansou_token(payload.base_url.rstrip("/"), username, password, token)
+        test = await test_pansou_connection(payload.base_url, token)
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(400, f"Pansou 连接测试失败：{str(error)}") from error
+    if payload.username:
+        vault.save_secret("pansou_username", payload.username)
+    if payload.password:
+        vault.save_secret("pansou_password", payload.password)
+    if token:
+        vault.save_secret("pansou_token", token)
+    store.save_settings({
+        "pansou_base_url": payload.base_url.rstrip("/"),
+        "pansou_api_path": payload.api_path,
+        "pansou_source": payload.source,
+    })
+    return {"saved": True, "test": test, "settings": integration_public_settings()}
+
+
+@app.post("/api/settings/pansou/test")
+async def test_pansou(_: str = Depends(require_login)):
+    config = pansou_config()
+    if not config["configured"]:
+        raise HTTPException(409, "尚未配置 Pansou 地址")
+    try:
+        token = await _resolve_pansou_token(
+            str(config["base_url"]), str(config["username"]),
+            str(config["password"]), str(config["token"]),
+        )
+        if token and token != config["token"]:
+            vault.save_secret("pansou_token", token)
+        return await test_pansou_connection(str(config["base_url"]), token)
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(502, f"Pansou 连接失败：{str(error)}") from error
+
+
+@app.put("/api/settings/checker")
+async def update_checker_settings(payload: CheckerSettingsRequest, _: str = Depends(require_login)):
+    if payload.clear_token:
+        vault.delete_secret("checker_token")
+    token = payload.token or ("" if payload.clear_token else vault.load_secret("checker_token"))
+    try:
+        test = await test_checker_connection(payload.base_url, token)
+    except ExternalValidatorError as error:
+        raise HTTPException(400, f"检测网站连接测试失败：{str(error)}") from error
+    if payload.token:
+        vault.save_secret("checker_token", payload.token)
+    store.save_settings({
+        "checker_base_url": payload.base_url.rstrip("/"),
+        "checker_api_path": payload.api_path,
+        "checker_timeout_seconds": payload.timeout_seconds,
+        "checker_cache_minutes": payload.cache_minutes,
+    })
+    return {"saved": True, "test": test, "settings": integration_public_settings()}
+
+
+@app.post("/api/settings/checker/test")
+async def test_checker(_: str = Depends(require_login)):
+    config = checker_config()
+    if not config["configured"]:
+        raise HTTPException(409, "尚未配置检测网站地址")
+    try:
+        return await test_checker_connection(str(config["base_url"]), str(config["token"]))
+    except ExternalValidatorError as error:
+        raise HTTPException(502, str(error)) from error
 
 
 @app.get("/api/settings/tmdb")

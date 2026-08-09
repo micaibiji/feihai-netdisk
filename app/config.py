@@ -42,7 +42,7 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         wecom_webhook_url=os.getenv("WECOM_WEBHOOK_URL", ""),
-        pansou_base_url=os.getenv("PANSOU_BASE_URL", "http://pansou:8888").rstrip("/"),
+        pansou_base_url=os.getenv("PANSOU_BASE_URL", "").rstrip("/"),
         provider_priority=tuple(
             item.strip()
             for item in os.getenv("PROVIDER_PRIORITY", "115,baidu,quark,china_mobile").split(",")

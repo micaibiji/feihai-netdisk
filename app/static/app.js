@@ -175,17 +175,18 @@ async function loadRanking(type, page) {
 }
 
 function searchPage() {
-  return `<section class="search-panel"><form id="resourceSearch"><span>⌕</span><input name="q" value="${esc(state.query)}" placeholder="输入电影、剧集、动漫或综艺名称" required><button class="primary">搜索</button></form><p>搜索 Telegram 与网盘聚合来源，并按最新集数和网盘优先级排序。</p></section><section id="searchOutput">${state.search ? results() : `<div class="empty-state"><i>⌕</i><h2>搜索全网影视资源</h2><p>例如：庆余年 第二季、哪吒、凡人修仙传</p></div>`}</section>`;
+  return `<section class="search-panel"><form id="resourceSearch"><span>⌕</span><input name="q" value="${esc(state.query)}" placeholder="输入电影、剧集、动漫或综艺名称" required><button class="primary">搜索</button></form><p>通过你在后台连接的 Pansou 搜索，再交给你的检测网站筛除失效链接。</p></section><section id="searchOutput">${state.search ? results() : `<div class="empty-state"><i>⌕</i><h2>搜索全网影视资源</h2><p>请先在“设置”中连接自己的 Pansou 和检测网站</p></div>`}</section>`;
 }
 function results() {
   const works = state.search.works || [],
     all = state.search.resources || [],
     p = state.search.progress || {},
+    detector = state.search.detector || {},
     list =
       state.provider === "all"
         ? all
         : all.filter((x) => x.provider === state.provider);
-  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>有效网盘资源 <em>${all.length}</em></button></div><div class="search-progress"><b>搜索与验证完成</b><span>发现 ${p.discovered || 0}</span><span class="ok">有效 ${p.valid || 0}</span><span>待识别 ${p.pending_recognition || 0}</span><span>暂不可验证 ${p.unverifiable || 0}</span><span>已失效 ${p.invalid || 0}</span></div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>仅展示已验证有效的网盘资源</b>${[
+  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>有效网盘资源 <em>${all.length}</em></button></div><div class="search-progress ${detector.status === "unavailable" ? "service-error" : ""}"><b>${detector.status === "unavailable" ? "检测服务异常，资源暂未展示" : "Pansou 搜索与外部检测完成"}</b><span>发现 ${p.discovered || 0}</span><span class="ok">有效 ${p.valid || 0}</span><span>暂不可验证 ${p.unverifiable || 0}</span><span>已失效 ${p.invalid || 0}</span>${detector.message ? `<small>${esc(detector.message)}</small>` : ""}</div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>只展示你的检测网站确认有效的资源</b>${[
     ["all", "全部"],
     ["115", "115"],
     ["baidu", "百度"],
@@ -198,7 +199,7 @@ function results() {
     )
     .join(
       "",
-    )}<span>共 ${list.length} 条 · 已去重</span></div><div class="resource-list">${list.map(resource).join("") || '<div class="empty-state compact"><p>暂时没有通过识别和有效性验证的资源；失效链接不会展示。</p></div>'}</div>`;
+    )}<span>共 ${list.length} 条 · 已去重</span></div><div class="resource-list">${list.map(resource).join("") || `<div class="empty-state compact"><p>${detector.status === "unavailable" ? "检测网站暂时不可用，找到的资源没有被当成失效；恢复连接后请重新搜索。" : "暂时没有检测到有效资源；已失效链接不会展示。"}</p></div>`}</div>`;
 }
 function resource(x) {
   const m = pm[x.provider],
@@ -206,7 +207,7 @@ function resource(x) {
       x.episode > 0
         ? `S${String(x.season || 1).padStart(2, "0")}E${String(x.episode).padStart(2, "0")}`
         : "集数待识别";
-  return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.normalized_title || x.title)}</h3><p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status valid"><span>✓ 已验证</span><small>${x.provider === "115" ? "优先来源" : "可用来源"}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
+  return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.normalized_title || x.title)}</h3><p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status valid"><span>✓ 外部检测有效</span><small>${x.provider === "115" ? "优先来源" : "可用来源"}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
 }
 
 function following() {
@@ -241,16 +242,16 @@ function library() {
   }</div></section>`;
 }
 function accounts() {
-  return `<section class="accounts-intro"><div><h2>网盘一键授权与扫码登录</h2><p>只显示当前真正可用的登录方式；授权信息加密保存在飞牛 NAS。</p></div><span><i></i>${state.overview.providers.filter((x) => x.configured).length} / 4 已连接</span></section><div class="accounts-grid">${state.overview.providers
+  return `<section class="accounts-intro"><div><h2>网盘授权、扫码与 Token 登录</h2><p>不会强制使用一种方式；Token、Cookie 和授权信息都只加密保存在飞牛 NAS。</p></div><span><i></i>${state.overview.providers.filter((x) => x.configured).length} / 4 已连接</span></section><div class="accounts-grid">${state.overview.providers
     .map((x) => {
       const m = pm[x.name],
         ok = x.configured,
         ready = (x.auth_methods || []).length > 0;
-      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${ready ? authMethodLabel(x.auth_methods[0]) : "需要先完成安全接入"}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer><button class="primary" ${ready ? `data-auth="${x.name}"` : `data-auth-guide="${x.name}"`}>${ok ? "重新登录" : ready ? "立即登录" : "查看授权说明"}</button></footer></article>`;
+      return `<article class="account-card"><header><i style="background:${m.color}">${m.short}</i><span><h3>${m.label}</h3><p>${esc(x.account_mask || "尚未授权")}</p></span><em class="${ok ? "connected" : "offline"}">${ok ? "已连接" : "未连接"}</em></header><dl><div><dt>可用方式</dt><dd>${ok && x.auth_method === "token" ? "Token / Cookie" : ready ? authMethodLabel(x.auth_methods[0]) : "Token / Cookie"}</dd></div><div><dt>风控状态</dt><dd>${esc(x.risk_status || "未检测")}</dd></div><div><dt>默认顺序</dt><dd>第 ${Object.keys(pm).indexOf(x.name) + 1} 位</dd></div></dl><footer><button ${ready ? `data-auth="${x.name}"` : `data-auth-guide="${x.name}"`}>${ready ? "扫码 / 官方授权" : "授权说明"}</button><button class="primary" data-token-auth="${x.name}">${ok ? "更新 Token" : "Token 登录"}</button></footer></article>`;
     })
     .join(
       "",
-    )}</div><aside class="security-note"><span>⌾</span><div><b>不伪造一键登录，也不把凭据交给未知中转</b><p>115 可直接显示二维码；其余网盘只有在满足“凭据保存在本机”的前提下才会开放登录按钮。</p></div></aside>`;
+    )}</div><aside class="security-note"><span>⌾</span><div><b>Token、Cookie 与扫码凭证都只保存在本机</b><p>请只填写从对应网盘官方客户端或官方网页取得的凭证；页面和日志不会回显原文。</p></div></aside>`;
 }
 function authMethodLabel(x) {
   return (
@@ -259,6 +260,7 @@ function authMethodLabel(x) {
       oauth: "官方一键授权",
       gateway_qr: "页面内二维码",
       gateway_password: "账号密码登录",
+      token: "Token / Cookie",
     }[x] || x
   );
 }
@@ -299,7 +301,7 @@ function settings() {
     ...state.overview.settings,
   };
   if (s.tmdb_region === "TW") s.tmdb_region = "zh-TW";
-  return `<div class="settings-grid"><form id="tmdbForm" class="settings-card full"><header><i>影</i><div><h3>TMDB 影视数据</h3><p>首页海报、全量排行、影视详情和自动识别；保存后立即生效，无需重启容器</p></div><em class="setting-state ${s.tmdb_configured ? "connected" : "offline"}">${s.tmdb_configured ? "已连接" : "未配置"}</em></header><label class="field"><div class="field-heading"><span>TMDB API 密钥</span><nav><a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">获取密钥 ↗</a><button type="button" id="tmdbGuide">填写教程</button></nav></div><div class="secret-field"><input type="password" name="api_key" placeholder="${s.tmdb_configured ? "已保存；留空表示不更换" : "请输入 API Key (v3 auth)"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>语言</span><select name="language"><option value="zh-CN" ${s.tmdb_language === "zh-CN" ? "selected" : ""}>简体中文</option><option value="zh-TW" ${s.tmdb_language === "zh-TW" ? "selected" : ""}>繁体中文</option></select></label><label class="field"><span>地区</span><select name="region"><option value="CN" ${s.tmdb_region === "CN" ? "selected" : ""}>中国大陆</option><option value="HK" ${s.tmdb_region === "HK" ? "selected" : ""}>中国香港</option><option value="TW" ${s.tmdb_region === "zh-TW" ? "selected" : ""}>中国台湾</option></select></label><label class="field"><span>首页排行</span><div class="setting-static"><b>全量内容，不限制日期</b><small>上映或首播时间从新到旧；同一天按热度从高到低</small></div></label><div class="settings-actions"><button type="button" id="testTmdb">测试连接</button><button class="primary">保存并刷新首页</button></div></form><form id="settingsForm" class="settings-card full"><header><i>▦</i><div><h3>通知、自动整理与飞牛影视</h3><p>保存后只影响后续任务，不自动移动或删除已有文件</p></div></header><label class="toggle-row"><span><b>Telegram 通知</b><small>追更、入库失败和风控异常提醒</small></span><input type="checkbox" name="telegram_enabled" ${s.telegram_enabled ? "checked" : ""}><i></i></label>${[
+  return `<div class="settings-grid"><form id="tmdbForm" class="settings-card full"><header><i>影</i><div><h3>TMDB 影视数据</h3><p>首页海报、全量排行、影视详情和自动识别；保存后立即生效，无需重启容器</p></div><em class="setting-state ${s.tmdb_configured ? "connected" : "offline"}">${s.tmdb_configured ? "已连接" : "未配置"}</em></header><label class="field"><div class="field-heading"><span>TMDB API 密钥</span><nav><a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">获取密钥 ↗</a><button type="button" id="tmdbGuide">填写教程</button></nav></div><div class="secret-field"><input type="password" name="api_key" placeholder="${s.tmdb_configured ? "已保存；留空表示不更换" : "请输入 API Key (v3 auth)"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>语言</span><select name="language"><option value="zh-CN" ${s.tmdb_language === "zh-CN" ? "selected" : ""}>简体中文</option><option value="zh-TW" ${s.tmdb_language === "zh-TW" ? "selected" : ""}>繁体中文</option></select></label><label class="field"><span>地区</span><select name="region"><option value="CN" ${s.tmdb_region === "CN" ? "selected" : ""}>中国大陆</option><option value="HK" ${s.tmdb_region === "HK" ? "selected" : ""}>中国香港</option><option value="TW" ${s.tmdb_region === "zh-TW" ? "selected" : ""}>中国台湾</option></select></label><label class="field"><span>首页排行</span><div class="setting-static"><b>全量内容，不限制日期</b><small>上映或首播时间从新到旧；同一天按热度从高到低</small></div></label><div class="settings-actions"><button type="button" id="testTmdb">测试连接</button><button class="primary">保存并刷新首页</button></div></form><form id="pansouForm" class="settings-card full"><header><i>搜</i><div><h3>连接自己的 Pansou</h3><p>只使用你的 Pansou 搜索 Telegram 与插件资源；飞海网盘不再内置 Pansou</p></div><em class="setting-state ${s.pansou_configured ? "connected" : "offline"}">${s.pansou_configured ? "已连接" : "未配置"}</em></header><label class="field"><span>Pansou 地址</span><input name="base_url" type="url" required value="${esc(s.pansou_base_url || "")}" placeholder="例如：http://192.168.100.225:8888"></label><label class="field"><span>搜索接口</span><input name="api_path" required value="${esc(s.pansou_api_path || "/api/search")}"></label><label class="field"><span>搜索来源</span><select name="source"><option value="all" ${s.pansou_source === "all" ? "selected" : ""}>全部来源</option><option value="tg" ${s.pansou_source === "tg" ? "selected" : ""}>Telegram频道</option><option value="plugin" ${s.pansou_source === "plugin" ? "selected" : ""}>搜索插件</option></select></label><label class="field"><span>账号（可选）</span><input name="username" autocomplete="off" placeholder="Pansou未启用登录时留空"></label><label class="field"><span>密码（可选）</span><div class="secret-field"><input type="password" name="password" autocomplete="new-password" placeholder="${s.pansou_auth_configured ? "已保存；留空表示不更换" : "可留空"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>Token（可选）</span><div class="secret-field"><input type="password" name="token" autocomplete="off" placeholder="${s.pansou_auth_configured ? "已保存；留空表示不更换" : "Bearer Token，可留空"}"><button type="button" data-toggle-secret>显示</button></div></label><div class="settings-actions"><button type="button" id="testPansou">测试已保存连接</button><button class="primary">测试并保存</button></div></form><form id="checkerForm" class="settings-card full"><header><i>验</i><div><h3>连接自己的网盘检测网站</h3><p>兼容 PanCheck 的批量检测接口；失效资源隐藏，服务异常时不会误判为失效</p></div><em class="setting-state ${s.checker_configured ? "connected" : "offline"}">${s.checker_configured ? "已连接" : "未配置"}</em></header><label class="field"><span>检测网站地址</span><input name="base_url" type="url" required value="${esc(s.checker_base_url || "")}" placeholder="例如：http://192.168.100.225:6080"></label><label class="field"><span>批量检测接口</span><input name="api_path" required value="${esc(s.checker_api_path || "/api/v1/links/check")}"></label><label class="field"><span>Token（可选）</span><div class="secret-field"><input type="password" name="token" autocomplete="off" placeholder="${s.checker_auth_configured ? "已保存；留空表示不更换" : "检测网站无需鉴权时留空"}"><button type="button" data-toggle-secret>显示</button></div></label><label class="field"><span>检测超时（秒）</span><input name="timeout_seconds" type="number" min="5" max="120" value="${s.checker_timeout_seconds || 35}"></label><label class="field"><span>结果缓存（分钟）</span><input name="cache_minutes" type="number" min="0" max="10080" value="${s.checker_cache_minutes ?? 120}"></label><div class="settings-actions"><button type="button" id="testChecker">测试已保存连接</button><button class="primary">测试并保存</button></div></form><form id="settingsForm" class="settings-card full"><header><i>▦</i><div><h3>通知、自动整理与飞牛影视</h3><p>保存后只影响后续任务，不自动移动或删除已有文件</p></div></header><label class="toggle-row"><span><b>Telegram 通知</b><small>追更、入库失败和风控异常提醒</small></span><input type="checkbox" name="telegram_enabled" ${s.telegram_enabled ? "checked" : ""}><i></i></label>${[
     ["auto_metadata", "自动匹配 TMDB 信息"],
     ["auto_subtitles", "自动整理中文字幕"],
     ["auto_organize", "入库后自动生成 STRM / NFO"],
@@ -438,6 +440,9 @@ function bind() {
     .forEach(
       (e) => (e.onclick = () => showProviderAuthGuide(e.dataset.authGuide)),
     );
+  document
+    .querySelectorAll("[data-token-auth]")
+    .forEach((e) => (e.onclick = () => tokenLogin(e.dataset.tokenAuth)));
   const rs = document.querySelector("#riskScan");
   if (rs) rs.onclick = runRisk;
   const pn = document.querySelector("#previewNaming");
@@ -446,6 +451,10 @@ function bind() {
   if (set) set.onsubmit = saveSettings;
   const tmdb = document.querySelector("#tmdbForm");
   if (tmdb) tmdb.onsubmit = saveTmdb;
+  const pansou = document.querySelector("#pansouForm");
+  if (pansou) pansou.onsubmit = savePansou;
+  const checker = document.querySelector("#checkerForm");
+  if (checker) checker.onsubmit = saveChecker;
   const tmdbGuide = document.querySelector("#tmdbGuide");
   if (tmdbGuide) tmdbGuide.onclick = showTmdbGuide;
   document.querySelectorAll("[data-toggle-secret]").forEach(
@@ -460,12 +469,16 @@ function bind() {
   if (nt) nt.onclick = testNotify;
   const tt = document.querySelector("#testTmdb");
   if (tt) tt.onclick = testTmdb;
+  const tp = document.querySelector("#testPansou");
+  if (tp) tp.onclick = testPansou;
+  const tc = document.querySelector("#testChecker");
+  if (tc) tc.onclick = testChecker;
 }
 async function search() {
   const out = document.querySelector("#searchOutput");
   if (out)
     out.innerHTML =
-      '<div class="empty-state"><span class="spinner"></span><h2>正在并行搜索</h2><p>Telegram、网盘和 TMDB</p></div>';
+      '<div class="empty-state"><span class="spinner"></span><h2>正在搜索并检查有效性</h2><p>你的 Pansou、检测网站和 TMDB</p></div>';
   try {
     state.search = await api(
       `/api/search?q=${encodeURIComponent(state.query)}`,
@@ -599,6 +612,29 @@ async function startAuth(p) {
     toast(e.message, "error");
   }
 }
+function tokenLogin(p) {
+  const m = pm[p],
+    labels = {
+      115: "Access Token 或 Cookie",
+      baidu: "Access Token",
+      quark: "Cookie 或 Token",
+      china_mobile: "Token 或 Cookie",
+    };
+  formModal(
+    `${m.label} Token 登录`,
+    `<aside class="form-warning">凭证会使用飞牛 NAS 本机密钥加密保存。请勿填写网盘账号密码。</aside><label>${labels[p]}<textarea name="credential" required minlength="6" autocomplete="off" placeholder="粘贴从${m.label}官方客户端或官方网页取得的凭证"></textarea></label>`,
+    async (d) => {
+      await api(`/api/providers/${p}/credential`, {
+        method: "POST",
+        body: JSON.stringify({
+          credential: d.credential.trim(),
+          account_mask: `${m.label} · Token 已保存`,
+        }),
+      });
+      await refresh(`${m.label} Token 已加密保存`);
+    },
+  );
+}
 async function pollAuth(id, p) {
   for (let i = 0; i < 90 && modalRoot.querySelector(".auth-modal"); i++) {
     await new Promise((r) => setTimeout(r, 2000));
@@ -673,6 +709,48 @@ async function saveSettings(e) {
     toast(x.message, "error");
   }
 }
+async function savePansou(e) {
+  e.preventDefault();
+  const f = e.currentTarget,
+    b = f.querySelector("button.primary"),
+    d = Object.fromEntries(new FormData(f));
+  d.clear_credentials = false;
+  b.disabled = true;
+  b.textContent = "正在连接并保存…";
+  try {
+    await api("/api/settings/pansou", {
+      method: "PUT",
+      body: JSON.stringify(d),
+    });
+    await refresh("Pansou 已连接，资源搜索将使用你的服务");
+  } catch (x) {
+    toast(x.message, "error");
+    b.disabled = false;
+    b.textContent = "测试并保存";
+  }
+}
+async function saveChecker(e) {
+  e.preventDefault();
+  const f = e.currentTarget,
+    b = f.querySelector("button.primary"),
+    d = Object.fromEntries(new FormData(f));
+  d.timeout_seconds = Number(d.timeout_seconds);
+  d.cache_minutes = Number(d.cache_minutes);
+  d.clear_token = false;
+  b.disabled = true;
+  b.textContent = "正在连接并保存…";
+  try {
+    await api("/api/settings/checker", {
+      method: "PUT",
+      body: JSON.stringify(d),
+    });
+    await refresh("检测网站已连接，搜索会自动隐藏失效资源");
+  } catch (x) {
+    toast(x.message, "error");
+    b.disabled = false;
+    b.textContent = "测试并保存";
+  }
+}
 async function saveTmdb(e) {
   e.preventDefault();
   const f = e.currentTarget,
@@ -695,6 +773,22 @@ async function testTmdb() {
   try {
     const x = await api("/api/settings/tmdb/test", { method: "POST" });
     toast(`TMDB 连接正常，读取到 ${x.items} 条榜单`);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+async function testPansou() {
+  try {
+    await api("/api/settings/pansou/test", { method: "POST" });
+    toast("Pansou 连接正常");
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+async function testChecker() {
+  try {
+    await api("/api/settings/checker/test", { method: "POST" });
+    toast("检测网站连接正常");
   } catch (e) {
     toast(e.message, "error");
   }
