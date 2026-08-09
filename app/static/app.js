@@ -149,7 +149,7 @@ function home() {
     )
     .join(
       "",
-    )}</div></header>${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>等待真实榜单</h2><p>配置并测试 TMDB 后自动显示，不使用演示海报。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>只展示验证有效的来源；失败或受限时自动切换备用来源。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>验证有效</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
+    )}</div></header>${has ? `<div class="poster-grid">${x.map(poster).join("")}</div>${rankingPagination(r)}` : '<div class="empty-state compact"><h2>等待真实榜单</h2><p>配置并测试 TMDB 后自动显示，不使用演示海报。</p></div>'}</section><section class="pipeline-card"><div><span>自动化流程</span><h2>最新来源自动进入飞牛影视</h2><p>检测网站明确判定失效的来源自动隐藏，其余来源保留并显示检测状态。</p></div><div class="pipeline"><span><i>⌕</i><b>发现资源</b></span><em>→</em><span><i>✓</i><b>有效性检测</b></span><em>→</em><span><i>✦</i><b>命名刮削</b></span><em>→</em><span><i>▦</i><b>飞牛影视</b></span></div></section>`;
   bind();
 }
 
@@ -186,7 +186,7 @@ function results() {
       state.provider === "all"
         ? all
         : all.filter((x) => x.provider === state.provider);
-  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>有效网盘资源 <em>${all.length}</em></button></div><div class="search-progress ${detector.status === "unavailable" ? "service-error" : ""}"><b>${detector.status === "unavailable" ? "检测服务异常，资源暂未展示" : "Pansou 搜索与外部检测完成"}</b><span>发现 ${p.discovered || 0}</span><span class="ok">有效 ${p.valid || 0}</span><span>暂不可验证 ${p.unverifiable || 0}</span><span>已失效 ${p.invalid || 0}</span>${detector.message ? `<small>${esc(detector.message)}</small>` : ""}</div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>只展示你的检测网站确认有效的资源</b>${[
+  return `<div class="result-tabs"><button class="active">影视作品 <em>${works.length}</em></button><button>可用网盘资源 <em>${all.length}</em></button></div><div class="search-progress ${detector.status === "unavailable" ? "service-error" : ""}"><b>${detector.status === "unavailable" ? "检测服务异常，已保留全部未判失效资源" : "Pansou 搜索与外部检测完成"}</b><span>发现 ${p.discovered || 0}</span><span class="ok">有效 ${p.valid || 0}</span><span>暂不可验证 ${p.unverifiable || 0}</span><span>已失效并隐藏 ${p.invalid || 0}</span>${detector.message ? `<small>${esc(detector.message)}</small>` : ""}</div><div class="work-row">${works.slice(0, 5).map(poster).join("") || '<p class="muted-copy">未配置 TMDB 或没有匹配作品。</p>'}</div><div class="filters"><b>仅隐藏检测网站明确判定失效的资源</b>${[
     ["all", "全部"],
     ["115", "115"],
     ["baidu", "百度"],
@@ -199,15 +199,21 @@ function results() {
     )
     .join(
       "",
-    )}<span>共 ${list.length} 条 · 已去重</span></div><div class="resource-list">${list.map(resource).join("") || `<div class="empty-state compact"><p>${detector.status === "unavailable" ? "检测网站暂时不可用，找到的资源没有被当成失效；恢复连接后请重新搜索。" : "暂时没有检测到有效资源；已失效链接不会展示。"}</p></div>`}</div>`;
+    )}<span>共 ${list.length} 条 · 已去重</span></div><div class="resource-list">${list.map(resource).join("") || '<div class="empty-state compact"><p>没有可显示的资源；检测网站明确判定失效的链接已隐藏。</p></div>'}</div>`;
 }
 function resource(x) {
   const m = pm[x.provider],
     episode =
       x.episode > 0
         ? `S${String(x.season || 1).padStart(2, "0")}E${String(x.episode).padStart(2, "0")}`
-        : "集数待识别";
-  return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.normalized_title || x.title)}</h3><p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status valid"><span>✓ 外部检测有效</span><small>${x.provider === "115" ? "优先来源" : "可用来源"}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
+        : "集数待识别",
+    validation =
+      x.validation_state === "valid"
+        ? { cls: "valid", label: "✓ 检测有效", hint: x.provider === "115" ? "优先来源" : "可用来源" }
+        : x.validation_state === "detector_unavailable"
+          ? { cls: "pending", label: "! 检测服务异常", hint: "未判定失效" }
+          : { cls: "pending", label: "↻ 暂不可验证", hint: "未判定失效" };
+  return `<article class="resource-row"><i class="drive-icon" style="background:${m.color}">${m.short}</i><div class="resource-main"><div><span>${m.label}</span><small>${esc(x.source)}</small></div><h3>${esc(x.normalized_title || x.title)}</h3><p><b>${esc(x.quality || "画质待识别")}</b><b>${episode}</b><b>已去重</b></p></div><div class="resource-status ${validation.cls}"><span>${validation.label}</span><small>${validation.hint}</small></div><div class="row-actions"><button data-copy="${esc(x.url)}">复制链接</button><button class="primary" data-intake='${esc(JSON.stringify(x))}'>一键入库</button></div></article>`;
 }
 
 function following() {

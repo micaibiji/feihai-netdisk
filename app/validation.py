@@ -33,6 +33,11 @@ class ExternalValidatorError(RuntimeError):
     pass
 
 
+def should_show_resource(state: str) -> bool:
+    """Only an explicit invalid result is hidden; every other checker state remains visible."""
+    return state != "invalid"
+
+
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 

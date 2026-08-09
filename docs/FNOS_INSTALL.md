@@ -141,7 +141,7 @@ Exited: 0
 健康检查地址为 `http://你的NAS局域网IP:12366/api/health`。正常结果中应包含：
 
 ```json
-{"status":"ok","name":"飞海网盘","version":"0.4.3","database":true,"strm_writable":true}
+{"status":"ok","name":"飞海网盘","version":"0.4.4","database":true,"strm_writable":true}
 ```
 
 ## 六、网盘授权

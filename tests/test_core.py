@@ -14,7 +14,7 @@ from app.services import (RANKING_PAGE_SIZE, _discover_tmdb_media, _find_urls,
                           media_folder, media_relative_path, parse_episode, safe_name,
                           trending_tmdb)
 from app.storage import JobStore
-from app.validation import validate_share_urls
+from app.validation import should_show_resource, validate_share_urls
 from app.vault import CredentialVault
 
 
@@ -127,6 +127,13 @@ def test_external_checker_maps_valid_invalid_and_pending(monkeypatch):
         urls, base_url="http://checker.local", token="secret",
     ))
     assert [result[url].state for url in urls] == ["valid", "invalid", "unverifiable"]
+
+
+def test_only_explicitly_invalid_checker_results_are_hidden():
+    assert should_show_resource("valid") is True
+    assert should_show_resource("unverifiable") is True
+    assert should_show_resource("detector_unavailable") is True
+    assert should_show_resource("invalid") is False
 
 
 def test_unified_naming_rules():

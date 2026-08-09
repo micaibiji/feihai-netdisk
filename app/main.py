@@ -30,8 +30,8 @@ from .services import (create_media_bundle, generate_strm, login_pansou, media_r
                        provider_auth_start, search_resources, search_tmdb, send_notifications,
                        test_pansou_connection, trending_tmdb)
 from .storage import JobStore
-from .validation import (ExternalValidatorError, test_checker_connection,
-                         validate_share_urls)
+from .validation import (ExternalValidatorError, should_show_resource,
+                         test_checker_connection, validate_share_urls)
 from .vault import CredentialVault
 
 settings = get_settings()
@@ -56,7 +56,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.4.3", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.4", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -77,9 +77,9 @@ async def subscription_worker() -> None:
                         record["fingerprint"], state=validation.state, reason=validation.reason,
                         checked_at=validation.checked_at, recheck_after=validation.recheck_after,
                     )
-                    if validation.state != "valid":
+                    if not should_show_resource(validation.state):
                         continue
-                    item["risk_status"] = "normal"
+                    item["risk_status"] = "normal" if validation.state == "valid" else "unknown"
                     selected = store.add_subscription_source(subscription["id"], item, settings.provider_priority)
                     if store.mark_seen(subscription["id"], item["fingerprint"]):
                         new_count += 1
@@ -162,7 +162,7 @@ def dashboard(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "name": settings.app_name, "version": "0.4.3", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
+    return {"status": "ok", "name": settings.app_name, "version": "0.4.4", "database": settings.database_path.exists(), "strm_writable": os.access(settings.strm_dir, os.W_OK)}
 
 
 @app.post("/api/verify-password")
@@ -445,15 +445,23 @@ async def intake(payload: IntakeRequest, _: str = Depends(require_login)):
                                     "auto_organize": payload.auto_organize, "message": f"请先授权 {provider.label}"})
     try:
         validation = (await check_external_links([str(payload.share_url)]))[str(payload.share_url)]
-    except ExternalValidatorError as error:
-        raise HTTPException(503, str(error)) from error
-    if validation.state != "valid":
-        raise HTTPException(409, f"入库前验证未通过：{validation.reason}")
+    except ExternalValidatorError:
+        validation = None
+    if validation is not None and not should_show_resource(validation.state):
+        raise HTTPException(409, f"入库前检测为失效：{validation.reason}")
+    validation_detail = validation.__dict__ if validation is not None else {
+        "state": "detector_unavailable", "reason": "检测网站暂时不可用",
+    }
+    validation_message = (
+        "检测网站确认有效，等待同网盘入库"
+        if validation is not None and validation.state == "valid"
+        else "未被检测网站判定为失效，已进入入库队列"
+    )
     job = store.create(kind="share_intake", provider=provider.name.value, title=payload.title,
                        status=JobStatus.QUEUED.value,
                        detail={"share_url": str(payload.share_url), "target_folder": payload.target_folder,
-                               "auto_organize": payload.auto_organize, "validation": validation.__dict__,
-                               "message": "已通过最终验证，等待同网盘入库"})
+                               "auto_organize": payload.auto_organize, "validation": validation_detail,
+                               "message": validation_message})
     store.add_operation(action="queue_intake", target_type="job", target_id=str(job["id"]),
                         summary=f"{payload.title} → {provider.label}:{payload.target_folder}")
     return job
@@ -499,6 +507,8 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
             record = records[item["url"]]
             validation = validations.get(item["url"])
             if validation is None:
+                item["validation_state"] = "detector_unavailable"
+                item["validation_reason"] = "检测网站暂时不可用"
                 return item, "detector_unavailable"
             store.update_resource_validation(
                 record["fingerprint"], state=validation.state, reason=validation.reason,
@@ -509,7 +519,7 @@ async def resource_search(q: str = Query(min_length=1, max_length=100), _: str =
             return item, validation.state
 
         checked = await asyncio.gather(*(check(item) for item in discovered[:100]))
-        visible = [item for item, state in checked if state == "valid"]
+        visible = [item for item, state in checked if should_show_resource(state)]
         counts: dict[str, int] = {"discovered": len(discovered), "valid": 0, "invalid": 0,
                                   "unverifiable": 0, "pending_recognition": 0,
                                   "detector_unavailable": 0}
