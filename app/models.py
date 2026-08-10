@@ -10,6 +10,7 @@ class ProviderName(StrEnum):
     QUARK = "quark"
     PAN115 = "115"
     CHINA_MOBILE = "china_mobile"
+    MAGNET = "magnet"
 
 
 class LoginRequest(BaseModel):
@@ -52,6 +53,15 @@ class TransferRequest(ResourceInspectRequest):
 class PreparePlayRequest(ResourceInspectRequest):
     title: str = Field(min_length=1, max_length=300)
     file_id: str = Field(default="", max_length=1000)
+
+
+class MagnetInspectRequest(BaseModel):
+    magnet_url: str = Field(min_length=20, max_length=8000, pattern=r"(?i)^magnet:\?xt=urn:btih:")
+
+
+class MagnetPrepareRequest(MagnetInspectRequest):
+    title: str = Field(min_length=1, max_length=300)
+    file_id: str = Field(min_length=1, max_length=20)
 
 
 class KeepTemporaryRequest(BaseModel):

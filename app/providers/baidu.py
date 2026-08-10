@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from http.cookies import SimpleCookie
 from pathlib import PurePosixPath
 from typing import Any
@@ -49,6 +50,26 @@ class BaiduAdapter(CloudAdapter):
         if self.cookie:
             headers["Cookie"] = self.cookie
         return headers
+
+    @staticmethod
+    def _cookie_with_share_verification(cookie: str, bdclnd: str) -> str:
+        """Merge Baidu's per-share verification cookie into the login cookie."""
+        if not bdclnd:
+            return cookie
+        parsed = SimpleCookie()
+        parsed.load(cookie)
+        parsed["BDCLND"] = bdclnd
+        return "; ".join(f"{key}={morsel.value}" for key, morsel in parsed.items())
+
+    @staticmethod
+    def _cookie_header_from_jar(jar: Any, fallback: str) -> str:
+        values: dict[str, str] = {}
+        parsed = SimpleCookie()
+        parsed.load(fallback)
+        values.update({key: morsel.value for key, morsel in parsed.items()})
+        for item in jar:
+            values[item.name] = item.value
+        return "; ".join(f"{key}={value}" for key, value in values.items())
 
     async def _json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = self.headers()
@@ -171,6 +192,42 @@ class BaiduAdapter(CloudAdapter):
             index = text.find(marker, index + len(marker))
         return None
 
+    @staticmethod
+    def _json_after_marker(text: str, marker: str) -> dict[str, Any] | None:
+        """Read the first balanced JSON object that follows a script marker."""
+        index = text.find(marker)
+        while index >= 0:
+            start = text.find("{", index + len(marker))
+            if start < 0:
+                return None
+            depth, quoted, escaped = 0, False, False
+            for pos in range(start, len(text)):
+                char = text[pos]
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = False
+                    continue
+                if char == '"':
+                    quoted = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            value = json.loads(text[start:pos + 1])
+                        except json.JSONDecodeError:
+                            break
+                        if isinstance(value, dict):
+                            return value
+                        break
+            index = text.find(marker, index + len(marker))
+        return None
+
     async def _open_share(self, share_url: str, extraction_code: str) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
         feature, surl, code = self.parse_share(share_url, extraction_code)
         cookies = SimpleCookie()
@@ -179,24 +236,78 @@ class BaiduAdapter(CloudAdapter):
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, cookies=cookie_dict, headers=self.headers()) as client:
             response = await client.get(f"https://pan.baidu.com/s/{feature}")
             response.raise_for_status()
+            verification_cookie = ""
+            account_bdstoken = ""
             if code:
+                token_response = await client.get(
+                    "https://pan.baidu.com/api/gettemplatevariable",
+                    params={
+                        "clienttype": 0,
+                        "app_id": "38824127",
+                        "web": 1,
+                        "fields": '["bdstoken","token","uk","servertime"]',
+                    },
+                )
+                token_response.raise_for_status()
+                token_body = token_response.json()
+                account_bdstoken = str((token_body.get("result") or {}).get("bdstoken") or "")
+                if not account_bdstoken:
+                    raise AuthenticationError("百度 Cookie 缺少有效 STOKEN，无法执行分享转存")
                 verify = await client.post(
                     "https://pan.baidu.com/share/verify",
-                    params={"surl": surl, "channel": "chunlei", "web": 1, "clienttype": 0},
-                    data={"pwd": code, "vcode": "", "vcode_str": ""},
+                    params={
+                        "surl": surl,
+                        "bdstoken": account_bdstoken,
+                        "t": int(time.time() * 1000),
+                        "channel": "chunlei",
+                        "web": 1,
+                        "clienttype": 0,
+                    },
+                    data={
+                        "pwd": code,
+                        "vcode": "",
+                        "vcode_str": "",
+                    },
                     headers={"Referer": share_url, "X-Requested-With": "XMLHttpRequest"},
                 )
                 result = verify.json()
                 if result.get("errno") not in (0, None):
                     raise CloudError("百度分享提取码不正确")
-                response = await client.get(f"https://pan.baidu.com/s/{feature}")
+                # randsk is the authoritative BDCLND for this exact share.
+                # A user's full Cookie can contain an older BDCLND from a
+                # different share, so never prefer the cookie-jar lookup.
+                verification_cookie = str(result.get("randsk") or client.cookies.get("BDCLND") or "")
+                verified_cookie = self._cookie_with_share_verification(
+                    self._cookie_header_from_jar(client.cookies.jar, self.cookie), verification_cookie
+                )
+                response = await client.get(
+                    f"https://pan.baidu.com/s/{feature}",
+                    headers={**self.headers(), "Cookie": verified_cookie},
+                )
                 response.raise_for_status()
             html = response.text
             if "platform-non-found" in html or "error-404" in html:
                 raise CloudError("百度分享链接已失效")
-            meta = self._balanced_json(html, '"shareid"')
+            # Current Baidu pages place the real transfer data in
+            # locals.mset({...}). A generic "shareid" match can hit the
+            # plugin manifest, where the values are only field names.
+            meta = (
+                self._json_after_marker(html, "locals.mset(")
+                or self._json_after_marker(html, "window.yunData=")
+                or self._balanced_json(html, '"shareid"')
+            )
             if not meta:
                 raise CloudError("百度分享页暂时无法解析；请确认 Cookie 中包含 BDUSS 和 STOKEN")
+            # The share transfer endpoint requires the BDCLND cookie produced
+            # by /share/verify. It is scoped to this share and must travel with
+            # the later transfer request, not be discarded with this client.
+            meta["_bdclnd"] = verification_cookie or str(client.cookies.get("BDCLND") or "")
+            meta["_share_cookie"] = self._cookie_with_share_verification(
+                self._cookie_header_from_jar(client.cookies.jar, self.cookie), verification_cookie
+            )
+            meta["_referer"] = share_url
+            if account_bdstoken and not meta.get("bdstoken"):
+                meta["bdstoken"] = account_bdstoken
             file_list = meta.get("file_list") or meta.get("fileList") or []
             if isinstance(file_list, dict):
                 file_list = file_list.get("list") or file_list.get("data") or []
@@ -225,7 +336,13 @@ class BaiduAdapter(CloudAdapter):
             raise CloudError("百度分享中没有可读取的文件")
         return ShareInspection(
             self.name, share_id, files[0].name, code, files,
-            {"share_uk": share_uk, "bdstoken": str(meta.get("bdstoken") or "")},
+            {
+                "share_uk": share_uk,
+                "bdstoken": str(meta.get("bdstoken") or ""),
+                "bdclnd": str(meta.get("_bdclnd") or ""),
+                "share_cookie": str(meta.get("_share_cookie") or ""),
+                "referer": str(meta.get("_referer") or share_url),
+            },
         )
 
     async def save_share(
@@ -243,12 +360,20 @@ class BaiduAdapter(CloudAdapter):
         bdstoken = fresh.secret.get("bdstoken", "")
         params = {
             "shareid": fresh.share_id, "from": fresh.secret["share_uk"], "bdstoken": bdstoken,
-            "channel": "chunlei", "web": 1, "clienttype": 0,
+            "app_id": "250528", "channel": "chunlei", "web": 1, "clienttype": 0,
         }
+        transfer_cookie = fresh.secret.get("share_cookie") or self._cookie_with_share_verification(
+            self.cookie, fresh.secret.get("bdclnd", "")
+        )
         body = await self._json(
             "POST", "https://pan.baidu.com/share/transfer", params=params,
             data={"fsidlist": json.dumps([int(item.id) for item in selected]), "path": target_path or "/"},
-            headers={"Referer": "https://pan.baidu.com/"},
+            headers={
+                "Cookie": transfer_cookie,
+                "Referer": fresh.secret.get("referer") or "https://pan.baidu.com/",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+            },
         )
         saved = await self.locate_saved_files(target_id, target_path, [item.name for item in selected])
         duplicate = int(body.get("errno") or 0) in (4, 12)

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.4">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.12">
 </head>
 <body>
   <header class="topbar">
@@ -83,6 +83,7 @@
         <button data-provider="all" class="active">全部</button>
         <button data-provider="baidu">百度</button><button data-provider="quark">夸克</button>
         <button data-provider="115">115</button><button data-provider="china_mobile">移动</button>
+        <button data-provider="magnet">磁力</button>
         <span id="resourceCount"></span>
       </div>
       <div id="resourceList" class="resource-list resource-grid"></div>
@@ -137,15 +138,15 @@
   </dialog>
 
   <dialog id="saveDialog" class="modal save-modal">
-    <button class="modal-close" data-close>×</button><p class="eyebrow">管理员 · 同网盘保存</p><h2>选择内容与保存目录</h2><p id="saveProviderRule"></p>
+    <button class="modal-close" data-close>×</button><p class="eyebrow">管理员 · 同网盘保存</p><h2>选择保存目录</h2><p id="saveProviderRule"></p>
     <div id="fileScope" class="file-scope"></div>
     <div class="directory-head"><div><strong>保存到</strong><span id="directoryPath">/</span></div><button id="createFolderButton" class="ghost">新建文件夹</button></div>
     <div id="directoryBreadcrumbs" class="breadcrumbs"></div><div id="directoryList" class="directory-list"></div>
     <label class="duplicate-field">发现同名版本时<select id="duplicatePolicy"><option value="skip">相同内容跳过</option><option value="keep_both">不同版本保留两份</option></select></label>
-    <button id="confirmSave" class="primary full">确认同盘保存</button>
+    <button id="confirmSave" class="primary full">保存原始全部内容</button>
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js?v=1.0.4" defer></script>
+  <script src="/static/app.js?v=1.0.12" defer></script>
 </body>
 </html>

@@ -87,6 +87,7 @@ class DirectLink:
     url: str
     headers: dict[str, str] = field(default_factory=dict)
     mime_type: str = "application/octet-stream"
+    redirect: bool = False
 
 
 def credential_payload(raw: str) -> dict[str, str]:

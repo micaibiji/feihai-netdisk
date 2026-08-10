@@ -4,6 +4,8 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
+import re
 import time
 import uuid
 from collections import defaultdict, deque
@@ -11,14 +13,16 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .integrations import check_links, rankings, search_pansou, search_tmdb, send_telegram, tmdb_details
+from .magnet import MagnetService
 from .models import (
     CreateFolderRequest,
     CredentialRequest,
@@ -26,6 +30,8 @@ from .models import (
     IntegrationSettingsRequest,
     KeepTemporaryRequest,
     LoginRequest,
+    MagnetInspectRequest,
+    MagnetPrepareRequest,
     PreparePlayRequest,
     ProviderName,
     ResourceInspectRequest,
@@ -33,8 +39,10 @@ from .models import (
     TransferRequest,
 )
 from .providers.auth import ProviderAuthError, poll_115_qr, start_115_qr
-from .providers.base import AuthenticationError, CapabilityError, CloudError, ShareFile
+from .providers.base import AuthenticationError, CapabilityError, CloudError, ShareFile, credential_payload
 from .providers.registry import ProviderRegistry
+from .providers.quark import QuarkAdapter
+from .providers.quark_tv import poll_quark_tv_qr, start_quark_tv_qr
 from .storage import Store, utc_now
 from .vault import CredentialVault
 
@@ -48,6 +56,8 @@ SESSION_SECONDS = 7 * 24 * 60 * 60
 _qr_sessions: dict[str, dict[str, Any]] = {}
 _inspect_cache: dict[str, tuple[float, Any]] = {}
 _play_rate: dict[str, deque[float]] = defaultdict(deque)
+_magnet_tasks: dict[str, asyncio.Task[None]] = {}
+magnet_service = MagnetService(settings.data_dir, settings.magnet_max_bytes)
 
 
 def _safe_equal(left: str, right: str) -> bool:
@@ -123,8 +133,11 @@ async def _cleanup_expired() -> None:
     while True:
         for item in store.expired_temps(utc_now()):
             try:
-                adapter = _adapter(item["provider"])
-                await adapter.delete([item["cloud_file_id"]], [item["direct_hint"].get("path", "")])
+                if item["provider"] == "magnet":
+                    magnet_service.safe_remove(item["direct_hint"].get("local_path", ""))
+                else:
+                    adapter = _adapter(item["provider"])
+                    await adapter.delete([item["cloud_file_id"]], [item["direct_hint"].get("path", "")])
                 store.set_temp_state(item["id"], "deleted")
                 store.add_history("temp_cleanup", item["provider"], f"已清理 {item['file_name']}")
             except Exception as error:
@@ -159,9 +172,11 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.4",
+        "version": "1.0.12",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
+        "magnet_playback": True,
+        "magnet_max_gb": round(settings.magnet_max_bytes / 1024 / 1024 / 1024),
     }
 
 
@@ -288,6 +303,18 @@ async def inspect_resource(payload: ResourceInspectRequest) -> dict[str, Any]:
         raise _cloud_error(error) from error
 
 
+@app.post("/api/magnet/inspect")
+async def inspect_magnet(payload: MagnetInspectRequest) -> dict[str, Any]:
+    try:
+        key = hashlib.sha256(payload.magnet_url.encode()).hexdigest()
+        cached = _inspect_cache.get(key)
+        inspection = cached[1] if cached and cached[0] > time.time() else await magnet_service.inspect(payload.magnet_url)
+        _inspect_cache[key] = (time.time() + 3600, inspection)
+        return inspection.public()
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
 def _limit_play(request: Request) -> None:
     key = request.client.host if request.client else "local"
     bucket = _play_rate[key]
@@ -324,10 +351,18 @@ def _temp_file(item: dict[str, Any]) -> ShareFile:
     )
 
 
+def _temporary_play_url(item: dict[str, Any]) -> str:
+    if item.get("provider") == "115":
+        return f"/api/hls/{item['id']}/master.m3u8"
+    return f"/api/play/{item['id']}"
+
+
 @app.post("/api/play/prepare")
 async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
     _limit_play(request)
     try:
+        if payload.provider.value == "115":
+            raise CapabilityError("115 已关闭在线播放，可复制分享链接或使用同盘保存")
         inspection = await _inspect(payload)
         candidates = [item for item in inspection.files if not item.is_dir and item.browser.playable]
         selected = next((item for item in candidates if item.id == payload.file_id), None) if payload.file_id else None
@@ -336,7 +371,7 @@ async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[st
             raise CapabilityError("这个资源没有确认适合网页播放的 MP4/H.264/AAC 或 WebM 文件")
         existing = store.find_ready_temp(payload.provider.value, str(payload.share_url), selected.name)
         if existing:
-            return {"temp_id": existing["id"], "play_url": f"/api/play/{existing['id']}", "reused": True}
+            return {"temp_id": existing["id"], "play_url": _temporary_play_url(existing), "reused": True}
         adapter = _adapter(payload.provider.value)
         folder = await adapter.ensure_folder(adapter.root_id, "/", settings.temp_folder_name)
         saved = await adapter.save_share(inspection, folder.id, folder.path, [selected.id], "skip")
@@ -366,23 +401,282 @@ async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[st
             "created_at": now.isoformat(),
         })
         store.add_history("prepare_play", payload.provider.value, f"临时保存 {saved_file.name}")
-        return {"temp_id": temp_id, "play_url": f"/api/play/{temp_id}", "reused": False}
+        created = store.temp(temp_id)
+        return {"temp_id": temp_id, "play_url": _temporary_play_url(created), "reused": False}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+def _magnet_temp_item(
+    temp_id: str,
+    payload: MagnetPrepareRequest,
+    file: ShareFile,
+    state: str,
+    now: datetime,
+    direct_hint: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": temp_id,
+        "provider": "magnet",
+        "title": payload.title,
+        "share_url": payload.magnet_url,
+        "extraction_code": "",
+        "cloud_file_id": temp_id,
+        "cloud_parent_id": "",
+        "file_name": file.name,
+        "mime_type": file.mime_type,
+        "size": file.size,
+        "direct_hint": direct_hint,
+        "last_played_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
+        "state": state,
+        "created_at": now.isoformat(),
+    }
+
+
+async def _download_magnet(temp_id: str, payload: MagnetPrepareRequest, selected: ShareFile) -> None:
+    now = datetime.now(UTC)
+    try:
+        local_path, downloaded = await magnet_service.download(
+            payload.magnet_url,
+            payload.file_id,
+            magnet_service.cache_dir / temp_id,
+        )
+        support = await magnet_service.probe_codecs(local_path)
+        if not support.playable:
+            raise CapabilityError(support.reason)
+        mime_type = "video/webm" if local_path.suffix.lower() == ".webm" else "video/mp4"
+        downloaded.mime_type = mime_type
+        store.add_temp(_magnet_temp_item(
+            temp_id,
+            payload,
+            downloaded,
+            "ready",
+            now,
+            {"local_path": str(local_path), "source_file_id": payload.file_id, "format_reason": support.reason},
+        ))
+        store.add_history("prepare_play", "magnet", f"磁力临时缓存 {downloaded.name}")
+    except Exception as error:
+        store.add_temp(_magnet_temp_item(
+            temp_id,
+            payload,
+            selected,
+            "failed",
+            now,
+            {"error": str(error)[:500], "source_file_id": payload.file_id},
+        ))
+
+
+@app.post("/api/magnet/prepare")
+async def prepare_magnet(payload: MagnetPrepareRequest, request: Request) -> dict[str, Any]:
+    _limit_play(request)
+    try:
+        inspection = await magnet_service.inspect(payload.magnet_url)
+        selected = next((item for item in inspection.files if item.id == payload.file_id), None)
+        if not selected or not selected.browser.playable:
+            raise CapabilityError("这个磁力资源没有确认适合网页播放的视频")
+        existing = store.find_ready_temp("magnet", payload.magnet_url, selected.name)
+        if existing and Path(existing["direct_hint"].get("local_path", "")).is_file():
+            return {
+                "temp_id": existing["id"],
+                "state": "ready",
+                "play_url": f"/api/play/{existing['id']}",
+                "status_url": f"/api/magnet/status/{existing['id']}",
+                "reused": True,
+            }
+        temp_id = uuid.uuid4().hex
+        now = datetime.now(UTC)
+        store.add_temp(_magnet_temp_item(
+            temp_id, payload, selected, "preparing", now,
+            {"source_file_id": payload.file_id, "expected_size": selected.size},
+        ))
+        task = asyncio.create_task(_download_magnet(temp_id, payload, selected))
+        _magnet_tasks[temp_id] = task
+        task.add_done_callback(lambda _: _magnet_tasks.pop(temp_id, None))
+        return {
+            "temp_id": temp_id,
+            "state": "preparing",
+            "play_url": f"/api/play/{temp_id}",
+            "status_url": f"/api/magnet/status/{temp_id}",
+            "reused": False,
+        }
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.get("/api/magnet/status/{temp_id}")
+def magnet_status(temp_id: str) -> dict[str, Any]:
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="磁力播放任务不存在") from error
+    if item["provider"] != "magnet":
+        raise HTTPException(status_code=400, detail="不是磁力播放任务")
+    return {
+        "temp_id": temp_id,
+        "state": item["state"],
+        "message": item["direct_hint"].get("error") or (
+            "视频已准备完成" if item["state"] == "ready" else "正在从磁力节点获取所选视频"
+        ),
+        "play_url": f"/api/play/{temp_id}" if item["state"] == "ready" else "",
+    }
+
+
+def _hls_asset_token(url: str) -> str:
+    payload = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    signature = hmac.new(settings.admin_password.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{payload}.{signature}"
+
+
+def _hls_asset_url(temp_id: str, url: str) -> str:
+    return f"/api/hls/{temp_id}/asset/{_hls_asset_token(url)}"
+
+
+def _decode_hls_asset(token: str) -> str:
+    try:
+        payload, signature = token.rsplit(".", 1)
+        expected = hmac.new(settings.admin_password.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError
+        padded = payload + "=" * (-len(payload) % 4)
+        url = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=400, detail="播放片段地址无效") from error
+    if not url.lower().startswith(("https://", "http://")):
+        raise HTTPException(status_code=400, detail="播放片段地址无效")
+    return url
+
+
+def _rewrite_hls_playlist(temp_id: str, text: str, base_url: str) -> str:
+    def localize(value: str) -> str:
+        if not value or value.startswith("data:"):
+            return value
+        return _hls_asset_url(temp_id, urljoin(base_url, value))
+
+    output: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            output.append(localize(line))
+            continue
+        output.append(re.sub(r'URI="([^"]+)"', lambda match: f'URI="{localize(match.group(1))}"', raw_line))
+    return "\n".join(output) + "\n"
+
+
+async def _proxy_115_hls(temp_id: str, item: dict[str, Any], url: str, request: Request) -> Response:
+    adapter = _adapter("115")
+    direct = await adapter.direct_link(_temp_file(item))
+    client = httpx.AsyncClient(timeout=None, follow_redirects=True)
+    headers = dict(direct.headers)
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+    upstream = await client.send(client.build_request("GET", url, headers=headers), stream=True)
+    if upstream.status_code >= 400:
+        await upstream.aclose()
+        await client.aclose()
+        raise CloudError(f"115播放线路返回 HTTP {upstream.status_code}")
+    content_type = upstream.headers.get("content-type", "").lower()
+    resolved_url = str(upstream.url)
+    is_playlist = "mpegurl" in content_type or resolved_url.lower().split("?", 1)[0].endswith(".m3u8")
+    if is_playlist:
+        content = (await upstream.aread()).decode("utf-8", errors="replace")
+        await upstream.aclose()
+        await client.aclose()
+        return Response(
+            _rewrite_hls_playlist(temp_id, content, resolved_url),
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "private, no-store", "X-Feihai-Playback": "115-hls"},
+        )
+
+    async def chunks() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream.aiter_bytes(1024 * 512):
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    response_headers = {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() in {"content-length", "content-range", "accept-ranges", "etag", "last-modified"}
+    }
+    return StreamingResponse(
+        chunks(),
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type") or "video/mp2t",
+        headers=response_headers,
+    )
+
+
+@app.get("/api/hls/{temp_id}/master.m3u8")
+async def hls_master(temp_id: str, request: Request) -> Response:
+    raise HTTPException(status_code=410, detail="115 已关闭在线播放")
+    # 保留下面的旧临时记录兼容代码，当前不会进入。
+    try:
+        item = store.temp(temp_id)
+        if item["provider"] != "115" or item["state"] != "ready":
+            raise HTTPException(status_code=400, detail="这不是可用的115临时播放文件")
+        now = utc_now()
+        store.touch_temp(
+            temp_id,
+            now.isoformat(),
+            (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
+        )
+        direct = await _adapter("115").direct_link(_temp_file(item))
+        return await _proxy_115_hls(temp_id, item, direct.url, request)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
+@app.get("/api/hls/{temp_id}/asset/{token}")
+async def hls_asset(temp_id: str, token: str, request: Request) -> Response:
+    raise HTTPException(status_code=410, detail="115 已关闭在线播放")
+    try:
+        item = store.temp(temp_id)
+        if item["provider"] != "115" or item["state"] != "ready":
+            raise HTTPException(status_code=400, detail="这不是可用的115临时播放文件")
+        return await _proxy_115_hls(temp_id, item, _decode_hls_asset(token), request)
+    except HTTPException:
+        raise
     except Exception as error:
         raise _cloud_error(error) from error
 
 
 @app.get("/api/play/{temp_id}")
-async def stream_temp(temp_id: str, request: Request) -> StreamingResponse:
+async def stream_temp(temp_id: str, request: Request) -> Response:
     try:
         item = store.temp(temp_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="临时播放文件不存在") from error
     if item["state"] != "ready":
-        raise HTTPException(status_code=410, detail="临时播放文件已经清理")
+        if item["state"] == "preparing":
+            raise HTTPException(status_code=425, detail="视频仍在准备中")
+        raise HTTPException(status_code=410, detail=item["direct_hint"].get("error") or "临时播放文件已经清理")
+    if item["provider"] == "115":
+        raise HTTPException(status_code=410, detail="115 已关闭在线播放")
     now = datetime.now(UTC)
     store.touch_temp(temp_id, now.isoformat(), (now + timedelta(hours=settings.temp_retention_hours)).isoformat())
+    if item["provider"] == "magnet":
+        local_path = Path(item["direct_hint"].get("local_path", ""))
+        try:
+            resolved = local_path.resolve()
+            root = magnet_service.cache_dir.resolve()
+            if not resolved.is_file() or root not in resolved.parents:
+                raise FileNotFoundError
+        except (OSError, FileNotFoundError) as error:
+            raise HTTPException(status_code=410, detail="磁力临时视频已不存在") from error
+        return FileResponse(resolved, media_type=item["mime_type"] or "video/mp4")
     try:
         direct = await _adapter(item["provider"]).direct_link(_temp_file(item))
+        if direct.redirect:
+            return RedirectResponse(
+                direct.url,
+                status_code=302,
+                headers={"Cache-Control": "private, no-store", "X-Feihai-Playback": "cloud-transcode"},
+            )
         client = httpx.AsyncClient(timeout=None, follow_redirects=True)
         upstream_headers = dict(direct.headers)
         if request.headers.get("range"):
@@ -437,9 +731,20 @@ def admin_overview(_: str = Depends(require_admin)) -> dict[str, Any]:
 async def save_account(provider: ProviderName, payload: CredentialRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
     name = provider.value
     try:
-        adapter = ProviderRegistry.create(name, payload.credential)
+        credential = payload.credential
+        if name == "quark":
+            incoming = credential_payload(payload.credential)
+            if "cookie" not in incoming:
+                incoming = {"cookie": incoming.get("credential", payload.credential)}
+            existing_raw = vault.load("provider_quark")
+            existing = credential_payload(existing_raw) if existing_raw else {}
+            for key in ("tv_refresh_token", "tv_device_id"):
+                if existing.get(key) and not incoming.get(key):
+                    incoming[key] = existing[key]
+            credential = json.dumps(incoming, ensure_ascii=False)
+        adapter = ProviderRegistry.create(name, credential)
         account = await adapter.probe()
-        vault.save(f"provider_{name}", payload.credential)
+        vault.save(f"provider_{name}", credential)
         return store.update_account(
             name,
             state="connected",
@@ -500,6 +805,50 @@ async def qr_poll(session_id: str, _: str = Depends(require_admin)) -> dict[str,
         raise _cloud_error(error) from error
 
 
+@app.post("/api/admin/accounts/quark/tv/qr/start")
+async def quark_tv_qr_start(_: str = Depends(require_admin)) -> dict[str, Any]:
+    if not vault.configured("provider_quark"):
+        raise HTTPException(status_code=400, detail="请先保存夸克 Cookie，再绑定电视端播放授权")
+    try:
+        public, secret_value = await start_quark_tv_qr()
+    except (AuthenticationError, CloudError, httpx.HTTPError) as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    session_id = uuid.uuid4().hex
+    _qr_sessions[session_id] = {"expires": time.time() + 300, "secret": secret_value}
+    return {"session_id": session_id, **public}
+
+
+@app.get("/api/admin/accounts/quark/tv/qr/{session_id}")
+async def quark_tv_qr_poll(session_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
+    session_value = _qr_sessions.get(session_id)
+    if not session_value or session_value["expires"] < time.time():
+        raise HTTPException(status_code=410, detail="二维码已过期，请刷新")
+    try:
+        state, message, tokens = await poll_quark_tv_qr(session_value["secret"])
+        if tokens:
+            current_raw = vault.load("provider_quark")
+            current = credential_payload(current_raw)
+            if "cookie" not in current:
+                current = {"cookie": current.get("credential", current_raw)}
+            current.update(tokens)
+            credential = json.dumps(current, ensure_ascii=False)
+            adapter = ProviderRegistry.create("quark", credential)
+            account = await adapter.probe()
+            vault.save("provider_quark", credential)
+            store.update_account(
+                "quark",
+                state="connected",
+                account_label=str(account.get("account") or "夸克账号"),
+                credential_kind="Cookie + 电视端扫码",
+                risk_status="normal",
+                last_error="",
+            )
+            _qr_sessions.pop(session_id, None)
+        return {"state": state, "message": message}
+    except Exception as error:
+        raise _cloud_error(error) from error
+
+
 @app.post("/api/admin/accounts/{provider}/directories")
 async def directories(provider: ProviderName, payload: DirectoryRequest, _: str = Depends(require_admin)) -> dict[str, Any]:
     try:
@@ -525,10 +874,15 @@ async def _run_save_job(job_id: int, payload: TransferRequest) -> None:
         adapter = _adapter(payload.provider.value)
         selected = [item for item in inspection.files if item.id in set(payload.selected_file_ids)]
         names = [item.name for item in selected] if selected else [item.name for item in inspection.files if not item.is_dir]
-        existing = await adapter.locate_saved_files(payload.target_id, payload.target_path, names)
-        if existing and payload.duplicate_policy == "skip":
-            store.update_job(job_id, status="success", progress=100, stage="同名内容已存在，已跳过", detail={"duplicate": True, "files": [item.name for item in existing]})
-            return
+        # A blank selection means "save the original share as-is". Do not
+        # enumerate and compare every nested file before that operation; the
+        # provider handles whole-share duplicates more reliably and quickly.
+        if payload.selected_file_ids and names:
+            store.update_job(job_id, progress=30, stage="正在检查目标目录")
+            existing = await adapter.locate_saved_files(payload.target_id, payload.target_path, names)
+            if existing and payload.duplicate_policy == "skip":
+                store.update_job(job_id, status="success", progress=100, stage="同名内容已存在，已跳过", detail={"duplicate": True, "files": [item.name for item in existing]})
+                return
         store.update_job(job_id, progress=45, stage="正在同网盘保存")
         result = await adapter.save_share(inspection, payload.target_id, payload.target_path, payload.selected_file_ids, payload.duplicate_policy)
         store.save_last_directory(payload.provider.value, payload.target_id, payload.target_path)
@@ -560,6 +914,62 @@ def jobs(_: str = Depends(require_admin)) -> dict[str, Any]:
 @app.get("/api/admin/temporary")
 def temporary(_: str = Depends(require_admin)) -> dict[str, Any]:
     return {"items": store.temps()}
+
+
+@app.get("/api/admin/temporary/{temp_id}/playback-diagnostics")
+async def playback_diagnostics(temp_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
+    """Return sanitized preview metadata without exposing signed URLs or credentials."""
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="临时播放文件不存在") from error
+    if item["provider"] != "quark":
+        return {"provider": item["provider"], "mode": "original"}
+    try:
+        adapter = _adapter("quark")
+        if not isinstance(adapter, QuarkAdapter):
+            raise CloudError("夸克适配器不可用")
+        preview = await adapter.request(
+            "POST",
+            f"{adapter.transcode_api}/file/v2/play/project",
+            json={
+                "fid": item["cloud_file_id"],
+                "resolutions": "low,normal,high,super,2k,4k",
+                "supports": "fmp4_av,m3u8,dolby_vision",
+            },
+        )
+        data = preview.get("data") if isinstance(preview, dict) else None
+        if not isinstance(data, dict):
+            return {
+                "provider": "quark",
+                "response_type": type(preview).__name__,
+                "data_type": type(data).__name__,
+                "top_keys": sorted(preview.keys()) if isinstance(preview, dict) else [],
+            }
+        options = []
+        for value in data.get("video_list") or []:
+            info = value.get("video_info") or {}
+            url = str(info.get("url") or "")
+            options.append({
+                "resolution": info.get("resolution") or value.get("resolution"),
+                "format": info.get("format"),
+                "hls_type": info.get("hls_type"),
+                "codec": info.get("codec"),
+                "audio_codec": (info.get("audio") or {}).get("codec"),
+                "success": info.get("success"),
+                "finish": info.get("finish"),
+                "has_url": bool(url),
+                "is_hls": ".m3u8" in url.lower(),
+                "size": info.get("size"),
+                "bitrate": info.get("bitrate"),
+            })
+        return {"provider": "quark", "options": options}
+    except Exception as error:
+        return {
+            "provider": "quark",
+            "error_type": type(error).__name__,
+            "error": str(error)[:300],
+        }
 
 
 @app.post("/api/admin/temporary/{temp_id}/keep")

@@ -21,6 +21,7 @@ class ProviderRegistry:
         "quark": "夸克网盘",
         "115": "115网盘",
         "china_mobile": "中国移动云盘",
+        "magnet": "磁力资源",
     }
     domains = {
         "baidu": ("pan.baidu.com",),
@@ -41,8 +42,10 @@ class ProviderRegistry:
 
     @classmethod
     def detect(cls, url: str) -> str:
+        if url.lower().startswith("magnet:?xt=urn:btih:"):
+            return "magnet"
         host = (urlparse(url).hostname or "").lower()
         for provider, domains in cls.domains.items():
             if any(host == domain or host.endswith("." + domain) for domain in domains):
                 return provider
-        raise CloudError("只支持百度、夸克、115和中国移动云盘链接")
+        raise CloudError("只支持百度、夸克、115、中国移动云盘和磁力链接")

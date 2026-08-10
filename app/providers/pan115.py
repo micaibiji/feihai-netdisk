@@ -226,16 +226,15 @@ class Pan115Adapter(CloudAdapter):
                     break
         if not file.pick_code:
             raise CloudError("115没有返回视频播放标识")
-        body = await self.request(
-            "GET", f"{self.api}/files/download", params={"pickcode": file.pick_code}
+        # The original download URL can be an unsupported HEVC/DTS file even
+        # when its extension is MP4.  115's web player exposes an HLS master
+        # playlist with browser-friendly transcodes; the app proxies and
+        # rewrites that playlist on the same origin for Hls.js.
+        return DirectLink(
+            f"https://115.com/api/video/m3u8/{file.pick_code}.m3u8",
+            {"Cookie": self.cookie, "Referer": "https://115.com/", "User-Agent": self.user_agent},
+            "application/vnd.apple.mpegurl",
         )
-        data = body.get("data") or body
-        url = data.get("file_url") or data.get("url") or data.get("download_url")
-        if isinstance(url, dict):
-            url = url.get("url")
-        if not url:
-            raise CloudError("115暂时没有返回可播放直链")
-        return DirectLink(str(url), {"Cookie": self.cookie, "Referer": "https://115.com/", "User-Agent": self.user_agent}, file.mime_type or "video/mp4")
 
     async def delete(self, file_ids: list[str], file_paths: list[str] | None = None) -> None:
         if not file_ids:

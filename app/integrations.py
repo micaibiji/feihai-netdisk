@@ -15,6 +15,8 @@ from .providers.registry import ProviderRegistry
 
 
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
+MAGNET_PATTERN = re.compile(r"magnet:\?[^\s\"'<>]+", re.I)
+LINK_PATTERN = re.compile(r"(?:https?://|magnet:\?)[^\s\"'<>]+", re.I)
 EPISODE_PATTERNS = (
     re.compile(r"S(?P<season>\d{1,2})\s*E(?P<episode>\d{1,4})", re.I),
     re.compile(r"第\s*(?P<episode>\d{1,4})\s*[集话期]"),
@@ -75,8 +77,8 @@ def _find_contexts(value: Any, query: str) -> list[tuple[str, str, str, str]]:
             for child in node:
                 walk(child, inherited_title, inherited_source, inherited_code)
         elif isinstance(node, str):
-            title = URL_PATTERN.sub("", inherited_title).strip(" -|，,。") or query
-            for url in URL_PATTERN.findall(node):
+            title = LINK_PATTERN.sub("", inherited_title).strip(" -|，,。") or query
+            for url in LINK_PATTERN.findall(node):
                 output.append((url.rstrip(".,，。)）]"), title, inherited_source, inherited_code))
 
     walk(value, query, "PanSou", "")
@@ -87,7 +89,7 @@ async def search_pansou(base_url: str, query: str, token: str = "") -> list[dict
     if not base_url:
         raise ValueError("请先在设置中填写自己的 PanSou 地址")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    payload = {"kw": query, "src": "all", "res": "all", "cloud_types": ["115", "baidu", "quark", "mobile"]}
+    payload = {"kw": query, "src": "all", "res": "all", "cloud_types": ["115", "baidu", "quark", "mobile", "magnet"]}
     body: Any = None
     errors: list[str] = []
     async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
@@ -182,7 +184,16 @@ async def check_links(base_url: str, urls: list[str], token: str = "") -> dict[s
             name = None
         if name and name not in platforms:
             platforms.append(name)
-    payload = {"links": unique, "selectedPlatforms": platforms}
+    checkable = []
+    for url in unique:
+        try:
+            if ProviderRegistry.detect(url) != "magnet":
+                checkable.append(url)
+        except Exception:
+            continue
+    if not checkable:
+        return fallback
+    payload = {"links": checkable, "selectedPlatforms": platforms}
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     body: Any = None
     async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
@@ -200,7 +211,7 @@ async def check_links(base_url: str, urls: list[str], token: str = "") -> dict[s
         return fallback
     valid, invalid, pending = _status_lists(body)
     result: dict[str, dict[str, str]] = {}
-    for url in unique:
+    for url in checkable:
         key = _canonical(url)
         if key in invalid:
             result[url] = {"state": "invalid", "reason": "检测网站明确判定链接失效"}
@@ -210,7 +221,7 @@ async def check_links(base_url: str, urls: list[str], token: str = "") -> dict[s
             result[url] = {"state": "unverifiable", "reason": "检测网站正在检测，保留显示"}
         else:
             result[url] = fallback[url]
-    return result
+    return {**fallback, **result}
 
 
 def tmdb_item(item: dict[str, Any], rank: int | None = None) -> dict[str, Any]:

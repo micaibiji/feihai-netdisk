@@ -21,6 +21,7 @@ class Settings:
     temp_retention_hours: int
     temp_folder_name: str
     cleanup_interval_seconds: int
+    magnet_max_bytes: int
 
     @property
     def database_path(self) -> Path:
@@ -43,4 +44,5 @@ def get_settings() -> Settings:
         temp_retention_hours=max(1, int(os.getenv("TEMP_RETENTION_HOURS", "48"))),
         temp_folder_name=os.getenv("TEMP_FOLDER_NAME", "影视临时播放").strip() or "影视临时播放",
         cleanup_interval_seconds=max(60, int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))),
+        magnet_max_bytes=max(1, int(float(os.getenv("MAGNET_MAX_GB", "30")) * 1024 * 1024 * 1024)),
     )

@@ -22,6 +22,7 @@ from .base import (
     extraction_code_from_url,
     join_path,
 )
+from .quark_tv import quark_tv_stream_link
 
 
 class QuarkAdapter(CloudAdapter):
@@ -29,16 +30,24 @@ class QuarkAdapter(CloudAdapter):
     label = "夸克网盘"
     root_id = "0"
     api = "https://drive-pc.quark.cn/1/clouddrive"
+    transcode_api = "https://drive.quark.cn/1/clouddrive"
     share_api = "https://drive-h.quark.cn/1/clouddrive"
     user_agent = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100 Safari/537.36"
+        "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
+        "Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
+    )
+    download_user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
     )
 
     def __init__(self, credential: str):
         super().__init__(credential)
         payload = credential_payload(credential)
         self.cookie = payload.get("cookie") or payload.get("credential", "")
+        self.tv_refresh_token = payload.get("tv_refresh_token", "")
+        self.tv_device_id = payload.get("tv_device_id", "")
         if "=" not in self.cookie:
             raise AuthenticationError("夸克凭证应为浏览器 Cookie")
 
@@ -46,14 +55,13 @@ class QuarkAdapter(CloudAdapter):
         return {
             "Cookie": self.cookie,
             "Accept": "application/json, text/plain, */*",
-            "Origin": "https://pan.quark.cn",
-            "Referer": "https://pan.quark.cn/",
+            "Referer": "https://pan.quark.cn",
             "User-Agent": self.user_agent,
         }
 
     @staticmethod
     def params(**extra: Any) -> dict[str, Any]:
-        return {"pr": "ucpro", "fr": "pc", "uc_param_str": "", **extra}
+        return {"pr": "ucpro", "fr": "pc", **extra}
 
     async def request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = self.headers()
@@ -61,8 +69,14 @@ class QuarkAdapter(CloudAdapter):
         params = self.params(**kwargs.pop("params", {}))
         async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
             response = await client.request(method, url, headers=headers, params=params, **kwargs)
-        response.raise_for_status()
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError:
+            response.raise_for_status()
+            raise CloudError("夸克接口返回了无法识别的内容")
+        if response.is_error:
+            message = body.get("message") or body.get("msg") or body.get("code") or response.reason_phrase
+            raise CloudError(f"夸克接口 {response.status_code}：{message}")
         if body.get("code") not in (None, 0) or body.get("status") not in (None, 200):
             message = body.get("message") or body.get("msg") or f"夸克接口返回 {body.get('code')}"
             if body.get("code") in (401, 403, 32003, 32004):
@@ -238,11 +252,63 @@ class QuarkAdapter(CloudAdapter):
         return result
 
     async def direct_link(self, file: ShareFile) -> DirectLink:
+        if self.tv_refresh_token and self.tv_device_id:
+            url = await quark_tv_stream_link(file.id, self.tv_refresh_token, self.tv_device_id)
+            return DirectLink(url, {}, "video/mp4", redirect=True)
+        # Quark's original download link is frequently rate-limited for large
+        # files.  Its web preview endpoint returns short-lived, browser-ready
+        # transcoded URLs that can be redirected to directly and therefore do
+        # not consume NAS upload bandwidth.  Prefer 1080p/720p over 2K/4K so a
+        # normal home connection can sustain playback.
+        try:
+            preview = await self.request(
+                "POST",
+                f"{self.transcode_api}/file/v2/play/project",
+                json={
+                    "fid": file.id,
+                    "resolutions": "low,normal,high,super,2k,4k",
+                    "supports": "fmp4_av,m3u8,dolby_vision",
+                },
+            )
+            video_list = (preview.get("data") or {}).get("video_list") or []
+            priorities = {"super": 60, "high": 50, "normal": 40, "low": 30, "2k": 20, "4k": 10}
+            candidates: list[tuple[int, dict[str, Any]]] = []
+            for item in video_list:
+                info = item.get("video_info") or {}
+                url = str(info.get("url") or "")
+                if not url:
+                    continue
+                format_name = str(info.get("format") or "").lower()
+                hls_type = str(info.get("hls_type") or "").lower()
+                if ".m3u8" in url.lower() or "m3u8" in format_name or "m3u8" in hls_type:
+                    continue
+                resolution = str(info.get("resolution") or item.get("resolution") or "").lower()
+                ready_bonus = 100 if info.get("success") is True or info.get("finish") is True else 0
+                candidates.append((ready_bonus + priorities.get(resolution, 0), info))
+            if candidates:
+                _, info = max(candidates, key=lambda value: value[0])
+                return DirectLink(str(info["url"]), {}, "video/mp4", redirect=True)
+        except (CloudError, httpx.HTTPError, AttributeError, KeyError, TypeError, ValueError):
+            # Some accounts or newly uploaded files may not have a preview yet.
+            # Retain the original-link proxy as a transparent fallback.
+            pass
+
         body = await self.request("POST", f"{self.api}/file/download", json={"fids": [file.id]})
         data = body.get("data") or []
         if not data or not data[0].get("download_url"):
             raise CloudError("夸克暂时没有返回可播放直链")
-        return DirectLink(str(data[0]["download_url"]), {"Referer": "https://pan.quark.cn/", "User-Agent": self.user_agent}, file.mime_type or "video/mp4")
+        # The download host validates account and browser context again.
+        # Omitting the Cookie currently makes the CDN return HTTP 412.
+        return DirectLink(
+            str(data[0]["download_url"]),
+            {
+                "Cookie": self.cookie,
+                "Origin": "https://pan.quark.cn",
+                "Referer": "https://pan.quark.cn/",
+                "User-Agent": self.download_user_agent,
+            },
+            file.mime_type or "video/mp4",
+        )
 
     async def delete(self, file_ids: list[str], file_paths: list[str] | None = None) -> None:
         if not file_ids:
