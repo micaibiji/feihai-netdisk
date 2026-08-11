@@ -174,7 +174,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.17",
+        "version": "1.0.18",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -359,44 +359,12 @@ def _temporary_play_url(item: dict[str, Any]) -> str:
     return f"/api/play/{item['id']}"
 
 
-def _normalized_title(value: str) -> str:
-    value = re.sub(r"<[^>]+>", "", value or "")
-    value = re.sub(r"\.(?:mp4|m4v|webm|mov|mkv)$", "", value, flags=re.IGNORECASE)
-    return "".join(re.findall(r"[0-9a-z\u3400-\u9fff]+", value.lower()))
-
-
-def _inspection_matches_title(inspection: Any, title: str) -> bool:
-    """Require share-directory evidence before allowing cloud playback.
-
-    PanSou titles are third-party metadata and can occasionally point to a
-    completely different share. Generic episode names such as ``01.mp4`` are
-    therefore not enough: the share title or one of its paths must contain the
-    requested movie/series title.
-    """
-    expected = _normalized_title(title)
-    if len(expected) < 2:
-        return True
-    evidence = [inspection.title, *(item.path or item.name for item in inspection.files)]
-    return any(expected in _normalized_title(value) for value in evidence)
-
-
-def _inspection_matches_media_shape(inspection: Any, media_type: str) -> bool:
-    playable = [item for item in inspection.files if not item.is_dir and item.browser.playable]
-    # A TMDB movie result must not silently open a 40-episode series merely
-    # because a third-party search entry reused the movie title and poster.
-    return not (media_type == "movie" and len(playable) > 3)
-
-
 @app.post("/api/play/prepare")
 async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
     try:
         if payload.provider.value == "115":
             raise CapabilityError("115 已关闭在线播放，可复制分享链接或使用同盘保存")
         inspection = await _inspect(payload)
-        if not _inspection_matches_title(inspection, payload.title):
-            raise CapabilityError("分享目录内容与片名不一致，已停止播放；请换一个来源")
-        if not _inspection_matches_media_shape(inspection, payload.media_type):
-            raise CapabilityError("分享内容是多集视频，与电影类型不一致，已停止播放；请换一个来源")
         candidates = [item for item in inspection.files if not item.is_dir and item.browser.playable]
         selected = next((item for item in candidates if item.id == payload.file_id), None) if payload.file_id else None
         selected = selected or (candidates[0] if candidates else None)

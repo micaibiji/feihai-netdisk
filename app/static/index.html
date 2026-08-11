@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.17">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.18">
 </head>
 <body>
   <header class="topbar">
@@ -85,6 +85,9 @@
         <button data-provider="baidu">百度</button><button data-provider="quark">夸克</button>
         <button data-provider="115">115</button><button data-provider="china_mobile">移动</button>
         <button data-provider="magnet">磁力</button>
+        <div class="resource-view-toggle" aria-label="资源展示方式">
+          <button data-resource-view="grid">卡片</button><button data-resource-view="list">列表</button>
+        </div>
         <span id="resourceCount"></span>
       </div>
       <div id="resourceList" class="resource-list resource-grid"></div>
@@ -148,6 +151,6 @@
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js?v=1.0.17" defer></script>
+  <script src="/static/app.js?v=1.0.18" defer></script>
 </body>
 </html>

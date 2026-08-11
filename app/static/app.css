@@ -21,6 +21,7 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
 
 /* 搜索结果采用高密度海报卡片墙，便于一次比较更多来源。 */
 .resource-list.resource-grid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px;align-items:start}
+.resource-view-toggle{display:flex;gap:4px;margin-left:auto;padding:3px;background:#eef5f1;border-radius:9px}.resource-view-toggle button{padding:7px 10px}.resource-list-view{grid-template-columns:1fr}.resource-list-view .resource-card h3{height:auto;overflow:visible;display:block;overflow-wrap:anywhere}.resource-list-view .inspect-state{max-width:none;text-align:left}
 .resource-grid .resource-card{display:block;padding:0;border-radius:15px;overflow:hidden;min-width:0;transition:.18s;box-shadow:0 3px 10px rgba(11,47,32,.04)}
 .resource-grid .resource-card:hover{box-shadow:0 10px 24px rgba(11,47,32,.1);border-color:#bddfce}
 .resource-cover{position:relative;aspect-ratio:16/11;overflow:hidden;background:linear-gradient(145deg,#173529,#081a13)}
@@ -104,6 +105,7 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .resource-filters{top:6px;display:flex;flex-wrap:wrap;gap:4px;padding:9px;border-radius:16px;overflow:visible}
   .resource-filters strong{flex:0 0 100%;margin:0 0 2px;font-size:13px}
   .resource-filters button{flex:1 1 0;min-width:0;padding:9px 2px;font-size:13px;white-space:nowrap}
+  .resource-view-toggle{flex:0 0 auto;margin:3px 0 0 auto;padding:3px}.resource-view-toggle button{flex:0 0 auto;min-width:58px;padding:8px 9px}
   .resource-filters span{flex:0 0 100%;margin:3px 0 0;text-align:right;font-size:12px}
   .resource-list.resource-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   .resource-grid .resource-card{padding:0;gap:0;border-radius:13px}
@@ -116,6 +118,7 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .resource-grid .resource-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:8px}
   .resource-grid .resource-actions button{padding:9px 2px;font-size:12px}
   .resource-grid .resource-actions button:last-child:nth-child(odd){grid-column:1/-1}
+  .resource-list-view .resource-card{grid-template-columns:64px minmax(0,1fr);padding:12px;gap:11px;border-radius:13px}.resource-list-view .resource-cover{aspect-ratio:auto;width:64px;height:94px}.resource-list-view .resource-poster{width:64px;height:94px}.resource-list-view .resource-body{padding:0}.resource-list-view .resource-card h3{font-size:15px;line-height:1.45;margin:0 0 8px}.resource-list-view .resource-actions{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.resource-list-view .resource-actions button:last-child:nth-child(odd){grid-column:1/-1}
 
   .inline-form{padding:12px;gap:9px}
   .simple-list article{align-items:stretch;flex-direction:column;gap:12px;padding:15px}
