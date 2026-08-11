@@ -13,7 +13,7 @@ from app import integrations
 from app.integrations import tmdb_details
 from app.magnet import bdecode, magnet_info_hash, torrent_files
 from app.providers.baidu import BaiduAdapter
-from app.providers.base import BrowserSupport, FolderEntry, ShareFile, browser_support
+from app.providers.base import BrowserSupport, DirectLink, FolderEntry, ShareFile, ShareInspection, browser_support
 from app.providers.mobile import MobileAdapter
 from app.providers.pan115 import Pan115Adapter
 from app.providers.auth import PAN115_QR_APP, PAN115_QR_TOKEN_URL, pan115_qr_image_url, pan115_qr_login_url
@@ -337,7 +337,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.12"
+    assert health["version"] == "1.0.17"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -347,6 +347,83 @@ def test_public_health_and_admin_boundary(web_client) -> None:
     )
     assert response.status_code == 200
     assert client.get("/api/admin/overview").status_code == 200
+
+
+def test_index_disables_referer(web_client) -> None:
+    client, _ = web_client
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert '<meta name="referrer" content="no-referrer">' in response.text
+
+
+def test_cloud_transcode_redirect_omits_referer(web_client, monkeypatch) -> None:
+    client, main = web_client
+    now = datetime.now(UTC)
+    main.store.add_temp(
+        {
+            "id": "quark-ready",
+            "provider": "quark",
+            "title": "测试视频",
+            "share_url": "https://pan.quark.cn/s/example",
+            "cloud_file_id": "f1",
+            "file_name": "01.mp4",
+            "mime_type": "video/mp4",
+            "state": "ready",
+            "direct_hint": {},
+            "last_played_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=48)).isoformat(),
+            "created_at": now.isoformat(),
+        }
+    )
+
+    class RedirectAdapter:
+        async def direct_link(self, _file):
+            return DirectLink("https://video.example/01.mp4", {}, "video/mp4", redirect=True)
+
+    monkeypatch.setattr(main, "_adapter", lambda _provider: RedirectAdapter())
+    response = client.get("/api/play/quark-ready", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["x-feihai-playback"] == "cloud-transcode"
+
+
+def test_playback_reuse_happens_before_rate_limit() -> None:
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    cloud_prepare = source.split('async def prepare_play', 1)[1].split('def _magnet_temp_item', 1)[0]
+    magnet_prepare = source.split('async def prepare_magnet', 1)[1].split('@app.get("/api/magnet/status', 1)[0]
+    assert cloud_prepare.index("if existing:") < cloud_prepare.index("_limit_play(request)")
+    assert magnet_prepare.index("if existing and") < magnet_prepare.index("_limit_play(request)")
+
+
+def test_share_directory_must_match_requested_title() -> None:
+    from app import main
+
+    correct = ShareInspection(
+        "quark", "ok", "寻秦记", "", [ShareFile("1", "01.mp4", path="/寻秦记/01.mp4")]
+    )
+    wrong = ShareInspection(
+        "quark", "bad", "韩剧合集", "", [ShareFile("2", "01.mp4", path="/韩剧合集/01.mp4")]
+    )
+    assert main._inspection_matches_title(correct, "寻秦记") is True
+    assert main._inspection_matches_title(wrong, "寻秦记") is False
+
+
+def test_movie_result_rejects_multi_episode_share() -> None:
+    from app import main
+
+    inspection = ShareInspection(
+        "quark",
+        "series",
+        "寻秦记",
+        "",
+        [
+            ShareFile(str(index), f"{index:02}.mp4", path=f"/寻秦记/{index:02}.mp4", browser=BrowserSupport(True))
+            for index in range(1, 41)
+        ],
+    )
+    assert main._inspection_matches_media_shape(inspection, "movie") is False
+    assert main._inspection_matches_media_shape(inspection, "tv") is True
 
 
 def test_constant_time_comparison_accepts_chinese_credentials(web_client) -> None:
@@ -385,6 +462,8 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "inspect-magnet" in script
     assert "/api/magnet/prepare" in script
     assert "115仅支持复制与同盘保存" in script
+    assert "分享目录与片名不一致，已拦截播放" in script
+    assert "多集内容与电影类型不一致，已拦截播放" in script
 
 
 def test_115_qr_login_uses_alipay_mini_device_type() -> None:

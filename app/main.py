@@ -164,7 +164,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # 网盘云端转码 CDN（尤其夸克）会拒绝带 NAS 页面来源的请求。
+    # 从文档入口统一禁用 Referer，确保浏览器后续的视频重定向请求不被 ACL 拦截。
+    return FileResponse(STATIC_DIR / "index.html", headers={"Referrer-Policy": "no-referrer"})
 
 
 @app.get("/api/health")
@@ -172,7 +174,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.12",
+        "version": "1.0.17",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -318,11 +320,11 @@ async def inspect_magnet(payload: MagnetInspectRequest) -> dict[str, Any]:
 def _limit_play(request: Request) -> None:
     key = request.client.host if request.client else "local"
     bucket = _play_rate[key]
-    cutoff = time.time() - 600
+    cutoff = time.time() - 120
     while bucket and bucket[0] < cutoff:
         bucket.popleft()
-    if len(bucket) >= 8:
-        raise HTTPException(status_code=429, detail="临时播放准备过于频繁，请十分钟后再试")
+    if len(bucket) >= 20:
+        raise HTTPException(status_code=429, detail="短时间准备了太多不同资源，请稍候两分钟再试")
     bucket.append(time.time())
 
 
@@ -357,13 +359,44 @@ def _temporary_play_url(item: dict[str, Any]) -> str:
     return f"/api/play/{item['id']}"
 
 
+def _normalized_title(value: str) -> str:
+    value = re.sub(r"<[^>]+>", "", value or "")
+    value = re.sub(r"\.(?:mp4|m4v|webm|mov|mkv)$", "", value, flags=re.IGNORECASE)
+    return "".join(re.findall(r"[0-9a-z\u3400-\u9fff]+", value.lower()))
+
+
+def _inspection_matches_title(inspection: Any, title: str) -> bool:
+    """Require share-directory evidence before allowing cloud playback.
+
+    PanSou titles are third-party metadata and can occasionally point to a
+    completely different share. Generic episode names such as ``01.mp4`` are
+    therefore not enough: the share title or one of its paths must contain the
+    requested movie/series title.
+    """
+    expected = _normalized_title(title)
+    if len(expected) < 2:
+        return True
+    evidence = [inspection.title, *(item.path or item.name for item in inspection.files)]
+    return any(expected in _normalized_title(value) for value in evidence)
+
+
+def _inspection_matches_media_shape(inspection: Any, media_type: str) -> bool:
+    playable = [item for item in inspection.files if not item.is_dir and item.browser.playable]
+    # A TMDB movie result must not silently open a 40-episode series merely
+    # because a third-party search entry reused the movie title and poster.
+    return not (media_type == "movie" and len(playable) > 3)
+
+
 @app.post("/api/play/prepare")
 async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
-    _limit_play(request)
     try:
         if payload.provider.value == "115":
             raise CapabilityError("115 已关闭在线播放，可复制分享链接或使用同盘保存")
         inspection = await _inspect(payload)
+        if not _inspection_matches_title(inspection, payload.title):
+            raise CapabilityError("分享目录内容与片名不一致，已停止播放；请换一个来源")
+        if not _inspection_matches_media_shape(inspection, payload.media_type):
+            raise CapabilityError("分享内容是多集视频，与电影类型不一致，已停止播放；请换一个来源")
         candidates = [item for item in inspection.files if not item.is_dir and item.browser.playable]
         selected = next((item for item in candidates if item.id == payload.file_id), None) if payload.file_id else None
         selected = selected or (candidates[0] if candidates else None)
@@ -372,6 +405,7 @@ async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[st
         existing = store.find_ready_temp(payload.provider.value, str(payload.share_url), selected.name)
         if existing:
             return {"temp_id": existing["id"], "play_url": _temporary_play_url(existing), "reused": True}
+        _limit_play(request)
         adapter = _adapter(payload.provider.value)
         folder = await adapter.ensure_folder(adapter.root_id, "/", settings.temp_folder_name)
         saved = await adapter.save_share(inspection, folder.id, folder.path, [selected.id], "skip")
@@ -469,7 +503,6 @@ async def _download_magnet(temp_id: str, payload: MagnetPrepareRequest, selected
 
 @app.post("/api/magnet/prepare")
 async def prepare_magnet(payload: MagnetPrepareRequest, request: Request) -> dict[str, Any]:
-    _limit_play(request)
     try:
         inspection = await magnet_service.inspect(payload.magnet_url)
         selected = next((item for item in inspection.files if item.id == payload.file_id), None)
@@ -484,6 +517,7 @@ async def prepare_magnet(payload: MagnetPrepareRequest, request: Request) -> dic
                 "status_url": f"/api/magnet/status/{existing['id']}",
                 "reused": True,
             }
+        _limit_play(request)
         temp_id = uuid.uuid4().hex
         now = datetime.now(UTC)
         store.add_temp(_magnet_temp_item(
@@ -675,7 +709,15 @@ async def stream_temp(temp_id: str, request: Request) -> Response:
             return RedirectResponse(
                 direct.url,
                 status_code=302,
-                headers={"Cache-Control": "private, no-store", "X-Feihai-Playback": "cloud-transcode"},
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "X-Feihai-Playback": "cloud-transcode",
+                    # Quark's cloud-transcode CDN rejects media subrequests
+                    # whose Referer points at the local NAS page.  Applying the
+                    # policy on the redirect response makes the browser omit it
+                    # while keeping the fast CDN-to-browser playback path.
+                    "Referrer-Policy": "no-referrer",
+                },
             )
         client = httpx.AsyncClient(timeout=None, follow_redirects=True)
         upstream_headers = dict(direct.headers)

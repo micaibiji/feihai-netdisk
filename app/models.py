@@ -53,6 +53,7 @@ class TransferRequest(ResourceInspectRequest):
 class PreparePlayRequest(ResourceInspectRequest):
     title: str = Field(min_length=1, max_length=300)
     file_id: str = Field(default="", max_length=1000)
+    media_type: str = Field(default="unknown", pattern=r"^(movie|tv|unknown)$")
 
 
 class MagnetInspectRequest(BaseModel):
