@@ -153,3 +153,14 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .brand{font-size:18px}.session-button{padding:8px 9px;font-size:12px}
   .main-nav button{font-size:12px}.hero{padding:26px 18px}.hero h1{font-size:31px}
 }
+
+/* 1.0.19：明确版本选择、统一资源状态与可控播放准备。 */
+.media-match{position:relative}.media-match.selected{border-color:#14b86c;box-shadow:0 0 0 2px rgba(20,184,108,.13)}
+.select-media{margin-top:9px;border:1px solid #bfe2d0;background:#fff;color:#087844;border-radius:8px;padding:7px 10px;font-weight:700}.media-match.selected .select-media{background:#e8f8f0}
+.chip.match{background:#eef3ff;color:#38599b}.chip.state-ready{background:#dff7ea;color:#077444}.chip.state-checking{background:#eef2f0;color:#6a766f}.chip.state-blocked{background:#fff1d8;color:#995e00}.chip.state-error{background:#ffe7e5;color:#b82d25}.chip.state-unknown{background:#edf1ef;color:#66726b}
+.player-progress{display:grid;grid-template-columns:minmax(120px,1fr) auto;gap:12px;align-items:center;margin-top:13px;color:#bcd2c7;font-size:12px}.player-progress>span{height:7px;background:#183127;border-radius:99px;overflow:hidden}.player-progress i{display:block;height:100%;width:2%;background:#25cf82;border-radius:99px;transition:width .35s}.player-task-actions{display:flex;gap:9px;margin-top:10px}.ghost.light{color:#d8eee3;border-color:#315346;background:#10271d}.backup-actions{display:flex;gap:9px;margin-top:14px}.backup-actions button{flex:1}
+@media(max-width:600px){
+  .main-nav{position:fixed;left:8px;right:8px;bottom:8px;z-index:45;grid-template-columns:repeat(3,1fr);box-shadow:0 10px 35px rgba(0,30,18,.22);padding:6px}.main-nav button{min-height:42px}.page{padding-bottom:118px}.toast{bottom:88px}
+  .media-match{grid-template-columns:74px minmax(0,1fr)}.media-match p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.select-media{width:100%}
+  .player-progress{grid-template-columns:1fr}.player-task-actions{display:grid;grid-template-columns:1fr}.backup-actions{display:grid}
+}

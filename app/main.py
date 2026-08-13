@@ -57,6 +57,7 @@ _qr_sessions: dict[str, dict[str, Any]] = {}
 _inspect_cache: dict[str, tuple[float, Any]] = {}
 _play_rate: dict[str, deque[float]] = defaultdict(deque)
 _magnet_tasks: dict[str, asyncio.Task[None]] = {}
+_cloud_play_tasks: dict[str, asyncio.Task[None]] = {}
 magnet_service = MagnetService(settings.data_dir, settings.magnet_max_bytes)
 
 
@@ -146,16 +147,43 @@ async def _cleanup_expired() -> None:
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
+async def _monitor_accounts() -> None:
+    """Low-frequency credential check; warnings are sent only when the state changes."""
+    await asyncio.sleep(60)
+    while True:
+        integration = _integration_values()
+        for provider in ("baidu", "quark", "115", "china_mobile"):
+            if not vault.configured(f"provider_{provider}"):
+                continue
+            previous = next((item for item in store.accounts() if item["provider"] == provider), {})
+            try:
+                data = await _adapter(provider).probe()
+                store.update_account(provider, state="connected", risk_status="normal", last_error="", account_label=str(data.get("account") or previous.get("account_label") or "已授权"))
+            except Exception as error:
+                message = str(error)[:300]
+                store.update_account(provider, state="error", risk_status="warning", last_error=message)
+                warning_key = f"account_warning_{provider}"
+                if store.settings().get(warning_key) != message:
+                    await send_telegram(integration["telegram_bot_token"], integration["telegram_chat_id"], f"飞海网盘提醒：{ProviderRegistry.labels[provider]} 授权或连接异常\n{message}")
+                    store.save_settings({warning_key: message})
+        await asyncio.sleep(6 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     store.initialize()
     vault.initialize()
     cleanup = asyncio.create_task(_cleanup_expired())
+    monitor = asyncio.create_task(_monitor_accounts())
     try:
         yield
     finally:
         cleanup.cancel()
-        await asyncio.gather(cleanup, return_exceptions=True)
+        monitor.cancel()
+        background_tasks = [*_cloud_play_tasks.values(), *_magnet_tasks.values()]
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
@@ -174,7 +202,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.18",
+        "version": "1.0.19",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -243,8 +271,38 @@ async def media_details_endpoint(
         raise HTTPException(status_code=502, detail=f"TMDB 详情暂时无法访问：{type(error).__name__}") from error
 
 
+def _resource_match(item: dict[str, Any], media: dict[str, Any] | None, query: str) -> tuple[int, list[str]]:
+    if not media:
+        return (20 if item.get("recognized") else 0), ["未选择影视版本"]
+    title = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(item.get("title") or "").casefold())
+    wanted = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(media.get("title") or query).casefold())
+    score, reasons = 0, []
+    if wanted and wanted in title:
+        score += 55
+        reasons.append("片名匹配")
+    elif item.get("recognized"):
+        score += 30
+        reasons.append("关键词相关")
+    year = str(media.get("year") or "")
+    if year and year in str(item.get("title") or ""):
+        score += 20
+        reasons.append("年份匹配")
+    is_series = bool(item.get("episode") or re.search(r"(?:S\d+E\d+|第\s*\d+\s*集|更新至?\s*\d+)", str(item.get("title") or ""), re.I))
+    if (media.get("media_type") == "tv") == is_series:
+        score += 15
+        reasons.append("影视类型匹配")
+    if item.get("validation_state") == "valid":
+        score += 10
+        reasons.append("链接已验证")
+    return min(score, 100), reasons
+
+
 @app.get("/api/search")
-async def search_endpoint(q: str = Query(min_length=1, max_length=200)) -> dict[str, Any]:
+async def search_endpoint(
+    q: str = Query(min_length=1, max_length=200),
+    tmdb_id: int | None = Query(None, ge=1),
+    media_type: str = Query("", pattern=r"^(|movie|tv)$"),
+) -> dict[str, Any]:
     integration = _integration_values()
     try:
         resources, media_result = await asyncio.gather(
@@ -263,20 +321,24 @@ async def search_endpoint(q: str = Query(min_length=1, max_length=200)) -> dict[
         integration["checker_token"],
     )
     visible = []
-    best_media = media[0] if media else None
+    selected_media = next((value for value in media if value.get("id") == tmdb_id and (not media_type or value.get("media_type") == media_type)), None)
+    selected_media = selected_media or (media[0] if media and tmdb_id is None else None)
     for item in resources:
         state = checked.get(item["url"], {"state": "unverifiable", "reason": "保留显示"})
         if state["state"] == "invalid":
             continue
         item["validation_state"] = state["state"]
         item["validation_reason"] = state["reason"]
-        item["poster"] = best_media.get("poster", "") if best_media else ""
-        item["overview"] = best_media.get("overview", "暂无简介") if best_media else "暂无简介"
-        item["media"] = best_media
+        item["poster"] = selected_media.get("poster", "") if selected_media else ""
+        item["overview"] = selected_media.get("overview", "暂无简介") if selected_media else "暂无简介"
+        item["media"] = selected_media
+        item["match_score"], item["match_reasons"] = _resource_match(item, selected_media, q)
         visible.append(item)
+    visible.sort(key=lambda value: (value.get("match_score", 0), value.get("validation_state") == "valid", value.get("episode", 0)), reverse=True)
     return {
         "query": q,
         "media": media,
+        "selected_media": selected_media,
         "resources": visible,
         "found": len(resources),
         "hidden_invalid": len(resources) - len(visible),
@@ -359,6 +421,55 @@ def _temporary_play_url(item: dict[str, Any]) -> str:
     return f"/api/play/{item['id']}"
 
 
+def _cloud_temp_item(temp_id: str, payload: PreparePlayRequest, selected: ShareFile, state: str, hint: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    return {
+        "id": temp_id, "provider": payload.provider.value, "title": payload.title,
+        "share_url": str(payload.share_url), "extraction_code": payload.extraction_code,
+        "cloud_file_id": selected.id, "cloud_parent_id": selected.parent_id,
+        "file_name": selected.name, "mime_type": selected.mime_type, "size": selected.size,
+        "direct_hint": hint, "last_played_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
+        "state": state, "created_at": now.isoformat(),
+    }
+
+
+async def _prepare_cloud_temp(temp_id: str, payload: PreparePlayRequest, inspection: Any, selected: ShareFile) -> None:
+    try:
+        adapter = _adapter(payload.provider.value)
+        store.update_temp(temp_id, direct_hint={"source_file_id": selected.id, "progress": 15, "stage": "正在创建临时播放目录"})
+        folder = await adapter.ensure_folder(adapter.root_id, "/", settings.temp_folder_name)
+        store.update_temp(temp_id, direct_hint={"source_file_id": selected.id, "progress": 35, "stage": "正在同盘保存所选视频"})
+        saved = await adapter.save_share(inspection, folder.id, folder.path, [selected.id], "skip")
+        saved_file = next((item for item in saved.saved_files if item.name == selected.name), None)
+        if not saved_file:
+            store.update_temp(temp_id, direct_hint={"source_file_id": selected.id, "progress": 70, "stage": "网盘已接受，正在定位视频"})
+            for attempt in range(4):
+                located = await adapter.locate_saved_files(folder.id, folder.path, [selected.name])
+                saved_file = located[0] if located else None
+                if saved_file:
+                    break
+                await asyncio.sleep(2 + attempt * 2)
+        if not saved_file:
+            raise CloudError("网盘已接受临时保存，但暂时找不到视频文件，请稍后重试")
+        now = datetime.now(UTC)
+        store.add_temp({
+            "id": temp_id, "provider": payload.provider.value, "title": payload.title,
+            "share_url": str(payload.share_url), "extraction_code": payload.extraction_code,
+            "cloud_file_id": saved_file.id, "cloud_parent_id": saved_file.parent_id or folder.id,
+            "file_name": saved_file.name, "mime_type": saved_file.mime_type, "size": saved_file.size,
+            "direct_hint": {**_file_hint(saved_file, selected.id), "progress": 100, "stage": "视频已准备完成"},
+            "last_played_at": now.isoformat(), "expires_at": (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
+            "state": "ready", "created_at": now.isoformat(),
+        })
+        store.add_history("prepare_play", payload.provider.value, f"临时保存 {saved_file.name}")
+    except asyncio.CancelledError:
+        store.update_temp(temp_id, state="canceled", direct_hint={"source_file_id": selected.id, "progress": 0, "stage": "已取消"})
+        raise
+    except Exception as error:
+        store.update_temp(temp_id, state="failed", direct_hint={"source_file_id": selected.id, "progress": 0, "stage": "准备失败", "error": str(error)[:500]})
+
+
 @app.post("/api/play/prepare")
 async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
     try:
@@ -372,41 +483,48 @@ async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[st
             raise CapabilityError("这个资源没有确认适合网页播放的 MP4/H.264/AAC 或 WebM 文件")
         existing = store.find_ready_temp(payload.provider.value, str(payload.share_url), selected.name)
         if existing:
-            return {"temp_id": existing["id"], "play_url": _temporary_play_url(existing), "reused": True}
+            return {"temp_id": existing["id"], "state": "ready", "play_url": _temporary_play_url(existing), "status_url": f"/api/play/status/{existing['id']}", "reused": True}
+        pending = store.find_temp(payload.provider.value, str(payload.share_url), selected.name)
+        if pending:
+            return {"temp_id": pending["id"], "state": "preparing", "play_url": "", "status_url": f"/api/play/status/{pending['id']}", "reused": True}
         _limit_play(request)
-        adapter = _adapter(payload.provider.value)
-        folder = await adapter.ensure_folder(adapter.root_id, "/", settings.temp_folder_name)
-        saved = await adapter.save_share(inspection, folder.id, folder.path, [selected.id], "skip")
-        saved_file = next((item for item in saved.saved_files if item.name == selected.name), None)
-        if not saved_file:
-            located = await adapter.locate_saved_files(folder.id, folder.path, [selected.name])
-            saved_file = located[0] if located else None
-        if not saved_file:
-            raise CloudError("网盘已接受临时保存，但暂时找不到视频文件，请稍后重试")
-        now = datetime.now(UTC)
         temp_id = uuid.uuid4().hex
-        store.add_temp({
-            "id": temp_id,
-            "provider": payload.provider.value,
-            "title": payload.title,
-            "share_url": str(payload.share_url),
-            "extraction_code": payload.extraction_code,
-            "cloud_file_id": saved_file.id,
-            "cloud_parent_id": saved_file.parent_id or folder.id,
-            "file_name": saved_file.name,
-            "mime_type": saved_file.mime_type,
-            "size": saved_file.size,
-            "direct_hint": _file_hint(saved_file, selected.id),
-            "last_played_at": now.isoformat(),
-            "expires_at": (now + timedelta(hours=settings.temp_retention_hours)).isoformat(),
-            "state": "ready",
-            "created_at": now.isoformat(),
-        })
-        store.add_history("prepare_play", payload.provider.value, f"临时保存 {saved_file.name}")
-        created = store.temp(temp_id)
-        return {"temp_id": temp_id, "play_url": _temporary_play_url(created), "reused": False}
+        store.add_temp(_cloud_temp_item(temp_id, payload, selected, "preparing", {"source_file_id": selected.id, "progress": 5, "stage": "任务已创建"}))
+        task = asyncio.create_task(_prepare_cloud_temp(temp_id, payload, inspection, selected))
+        _cloud_play_tasks[temp_id] = task
+        task.add_done_callback(lambda _: _cloud_play_tasks.pop(temp_id, None))
+        return {"temp_id": temp_id, "state": "preparing", "play_url": "", "status_url": f"/api/play/status/{temp_id}", "reused": False}
     except Exception as error:
         raise _cloud_error(error) from error
+
+
+@app.get("/api/play/status/{temp_id}")
+def cloud_play_status(temp_id: str) -> dict[str, Any]:
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="播放准备任务不存在") from error
+    hint = item["direct_hint"]
+    return {
+        "temp_id": temp_id, "state": item["state"], "progress": int(hint.get("progress") or 0),
+        "message": hint.get("error") or hint.get("stage") or "正在准备视频",
+        "play_url": _temporary_play_url(item) if item["state"] == "ready" else "",
+    }
+
+
+@app.delete("/api/play/status/{temp_id}")
+async def cancel_cloud_play(temp_id: str) -> dict[str, Any]:
+    task = _cloud_play_tasks.get(temp_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    try:
+        item = store.temp(temp_id)
+        if item["state"] == "preparing":
+            store.update_temp(temp_id, state="canceled", direct_hint={**item["direct_hint"], "progress": 0, "stage": "已取消"})
+    except KeyError:
+        pass
+    return {"ok": True}
 
 
 def _magnet_temp_item(
@@ -735,6 +853,70 @@ def admin_overview(_: str = Depends(require_admin)) -> dict[str, Any]:
         "subscriptions": store.subscriptions(),
         "history": store.history(30),
     }
+
+
+@app.get("/api/admin/backup")
+def export_backup(_: str = Depends(require_admin)) -> Response:
+    vault.initialize()
+    credentials = {
+        path.name: base64.b64encode(path.read_bytes()).decode()
+        for path in vault.secret_dir.glob("*.token") if path.is_file()
+    }
+    payload = {
+        "format": "feihai-portable-backup", "version": 1, "created_at": utc_now(),
+        "database": store.export_portable(), "credentials": credentials,
+        "credential_key": base64.b64encode(vault.key_path.read_bytes()).decode(),
+    }
+    filename = f"feihai-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return Response(
+        json.dumps(payload, ensure_ascii=False, indent=2), media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/admin/backup/restore")
+async def restore_backup(request: Request, _: str = Depends(require_admin)) -> dict[str, Any]:
+    raw = await request.body()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="备份文件过大")
+    try:
+        payload = json.loads(raw)
+        if payload.get("format") != "feihai-portable-backup" or int(payload.get("version") or 0) != 1:
+            raise ValueError
+        key = base64.b64decode(payload["credential_key"], validate=True)
+        credentials = payload.get("credentials") or {}
+        if len(key) < 32 or not isinstance(credentials, dict):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=400, detail="不是有效的飞海网盘备份文件") from error
+    vault.initialize()
+    vault.key_path.write_bytes(key)
+    for name, value in credentials.items():
+        if re.fullmatch(r"[a-zA-Z0-9_.-]+\.token", str(name)):
+            try:
+                (vault.secret_dir / str(name)).write_bytes(base64.b64decode(value, validate=True))
+            except (ValueError, TypeError):
+                continue
+    store.restore_portable(payload.get("database") or {})
+    store.add_history("restore_backup", "", "已恢复系统设置、追更、目录与加密凭证")
+    return {"ok": True, "message": "备份已恢复，请重新测试各网盘连接"}
+
+
+@app.post("/api/admin/accounts/check-all")
+async def check_all_accounts(_: str = Depends(require_admin)) -> dict[str, Any]:
+    results = []
+    for provider in ("baidu", "quark", "115", "china_mobile"):
+        if not vault.configured(f"provider_{provider}"):
+            results.append({"provider": provider, "state": "not_configured"})
+            continue
+        try:
+            data = await _adapter(provider).probe()
+            store.update_account(provider, state="connected", risk_status="normal", last_error="", account_label=str(data.get("account") or "已授权"))
+            results.append({"provider": provider, "state": "connected"})
+        except Exception as error:
+            store.update_account(provider, state="error", risk_status="warning", last_error=str(error)[:300])
+            results.append({"provider": provider, "state": "error", "message": str(error)[:300]})
+    return {"results": results}
 
 
 @app.put("/api/admin/accounts/{provider}")

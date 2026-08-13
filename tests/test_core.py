@@ -337,7 +337,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.18"
+    assert health["version"] == "1.0.19"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -396,6 +396,49 @@ def test_playback_reuse_happens_before_rate_limit() -> None:
     assert magnet_prepare.index("if existing and") < magnet_prepare.index("_limit_play(request)")
 
 
+def test_resource_match_scores_exact_title_year_and_type() -> None:
+    import app.main as main
+
+    item = {"title": "庆余年 第二季 2024 S02E01 1080P", "recognized": True, "episode": 1, "validation_state": "valid"}
+    media = {"title": "庆余年 第二季", "year": "2024", "media_type": "tv"}
+    score, reasons = main._resource_match(item, media, "庆余年")
+    assert score == 100
+    assert {"片名匹配", "年份匹配", "影视类型匹配", "链接已验证"}.issubset(reasons)
+
+
+def test_cloud_play_status_and_cancel(web_client) -> None:
+    client, main = web_client
+    now = datetime.now(UTC)
+    main.store.add_temp(
+        {
+            "id": "pending-cloud", "provider": "quark", "title": "测试", "share_url": "https://pan.quark.cn/s/test",
+            "cloud_file_id": "source", "file_name": "01.mp4", "state": "preparing",
+            "direct_hint": {"progress": 35, "stage": "正在同盘保存所选视频"},
+            "last_played_at": now.isoformat(), "expires_at": (now + timedelta(hours=48)).isoformat(), "created_at": now.isoformat(),
+        }
+    )
+    status = client.get("/api/play/status/pending-cloud").json()
+    assert status["state"] == "preparing"
+    assert status["progress"] == 35
+    assert client.delete("/api/play/status/pending-cloud").status_code == 200
+    assert main.store.temp("pending-cloud")["state"] == "canceled"
+
+
+def test_portable_backup_restore_round_trip(tmp_path: Path) -> None:
+    first = Store(tmp_path / "first.db")
+    first.initialize()
+    first.save_settings({"pansou_url": "http://pansou"})
+    first.add_subscription("庆余年", "tv", 2024)
+    first.save_last_directory("quark", "folder", "/影视")
+    payload = first.export_portable()
+    second = Store(tmp_path / "second.db")
+    second.initialize()
+    second.restore_portable(payload)
+    assert second.settings()["pansou_url"] == "http://pansou"
+    assert second.subscriptions()[0]["title"] == "庆余年"
+    assert second.last_directories()["quark"]["folder_path"] == "/影视"
+
+
 def test_constant_time_comparison_accepts_chinese_credentials(web_client) -> None:
     _, main = web_client
     assert main._safe_equal("请改成一个强密码", "请改成一个强密码") is True
@@ -431,11 +474,11 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "保存原始分享的全部内容" in script
     assert "inspect-magnet" in script
     assert "/api/magnet/prepare" in script
-    assert "115仅支持复制与同盘保存" in script
-    assert "可播放，但分享目录与片名可能不一致" in script
-    assert "可播放，但多集内容与电影类型可能不一致" in script
+    assert "115 不提供网页播放" in script
+    assert "可播放；片名可能不一致，请自行确认" in script
+    assert "可播放；集数形态可能不一致，请自行确认" in script
     assert "data-resource-view" in Path("app/static/index.html").read_text(encoding="utf-8")
-    assert "resourceView:window.matchMedia" in script
+    assert "localStorage.getItem('feihai-resource-view')" in script
     assert "resource-list-view" in Path("app/static/app.css").read_text(encoding="utf-8")
 
 

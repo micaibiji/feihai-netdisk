@@ -225,6 +225,34 @@ class Store:
         item["direct_hint"] = json.loads(item["direct_hint"])
         return item
 
+    def find_temp(self, provider: str, share_url: str, file_name: str, states: tuple[str, ...] = ("preparing",)) -> dict[str, Any] | None:
+        placeholders = ",".join("?" for _ in states)
+        with self.connect() as db:
+            row = db.execute(
+                f"SELECT * FROM fh_temp_media WHERE provider=? AND share_url=? AND file_name=? "
+                f"AND state IN ({placeholders}) ORDER BY created_at DESC LIMIT 1",
+                (provider, share_url, file_name, *states),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["direct_hint"] = json.loads(item["direct_hint"])
+        return item
+
+    def update_temp(self, temp_id: str, *, state: str | None = None, direct_hint: dict[str, Any] | None = None) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if state is not None:
+            values["state"] = state
+        if direct_hint is not None:
+            values["direct_hint"] = json.dumps(direct_hint, ensure_ascii=False)
+        if values:
+            with self.connect() as db:
+                db.execute(
+                    f"UPDATE fh_temp_media SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+                    (*values.values(), temp_id),
+                )
+        return self.temp(temp_id)
+
     def set_temp_state(self, temp_id: str, state: str) -> None:
         with self.connect() as db:
             db.execute("UPDATE fh_temp_media SET state=? WHERE id=?", (state, temp_id))
@@ -262,3 +290,41 @@ class Store:
                 "SELECT * FROM fh_operation_history ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def export_portable(self) -> dict[str, Any]:
+        with self.connect() as db:
+            settings = [dict(row) for row in db.execute("SELECT * FROM fh_settings").fetchall()]
+            accounts = [dict(row) for row in db.execute("SELECT * FROM fh_accounts").fetchall()]
+            subscriptions = [dict(row) for row in db.execute("SELECT * FROM fh_subscriptions").fetchall()]
+            directories = [dict(row) for row in db.execute("SELECT * FROM fh_last_directories").fetchall()]
+        return {"settings": settings, "accounts": accounts, "subscriptions": subscriptions, "directories": directories}
+
+    def restore_portable(self, payload: dict[str, Any]) -> None:
+        with self.connect() as db:
+            for row in payload.get("settings", []):
+                if isinstance(row, dict) and row.get("key") and "value" in row:
+                    db.execute(
+                        "INSERT INTO fh_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (str(row["key"]), str(row["value"]), utc_now()),
+                    )
+            for row in payload.get("accounts", []):
+                if isinstance(row, dict) and row.get("provider") in {"baidu", "quark", "115", "china_mobile"}:
+                    db.execute(
+                        "UPDATE fh_accounts SET state=?,account_label=?,credential_kind=?,risk_status=?,last_error=?,updated_at=? WHERE provider=?",
+                        (str(row.get("state") or "disconnected"), str(row.get("account_label") or ""),
+                         str(row.get("credential_kind") or ""), str(row.get("risk_status") or "unknown"),
+                         str(row.get("last_error") or ""), utc_now(), str(row["provider"])),
+                    )
+            for row in payload.get("subscriptions", []):
+                if isinstance(row, dict) and row.get("title"):
+                    now = utc_now()
+                    db.execute(
+                        "INSERT INTO fh_subscriptions(title,media_type,year,created_at,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(title) DO UPDATE SET media_type=excluded.media_type,year=excluded.year,enabled=1,updated_at=excluded.updated_at",
+                        (str(row["title"]), str(row.get("media_type") or "tv"), row.get("year"), now, now),
+                    )
+            for row in payload.get("directories", []):
+                if isinstance(row, dict) and row.get("provider"):
+                    db.execute(
+                        "INSERT INTO fh_last_directories(provider,folder_id,folder_path,updated_at) VALUES (?,?,?,?) ON CONFLICT(provider) DO UPDATE SET folder_id=excluded.folder_id,folder_path=excluded.folder_path,updated_at=excluded.updated_at",
+                        (str(row["provider"]), str(row.get("folder_id") or ""), str(row.get("folder_path") or "/"), utc_now()),
+                    )
