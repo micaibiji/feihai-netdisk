@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -241,6 +242,6 @@ class Pan115Adapter(CloudAdapter):
             return
         data = [("fid[]", value) for value in file_ids]
         await self.request(
-            "POST", f"{self.api}/rb/delete", data=data,
+            "POST", f"{self.api}/rb/delete", content=urlencode(data).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )

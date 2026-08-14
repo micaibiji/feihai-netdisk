@@ -13,7 +13,7 @@ from app import integrations
 from app.integrations import tmdb_details
 from app.magnet import bdecode, magnet_info_hash, torrent_files
 from app.providers.baidu import BaiduAdapter
-from app.providers.base import BrowserSupport, DirectLink, FolderEntry, ShareFile, browser_support
+from app.providers.base import BrowserSupport, CloudError, DirectLink, FolderEntry, ShareFile, browser_support
 from app.providers.mobile import MobileAdapter
 from app.providers.pan115 import Pan115Adapter
 from app.providers.auth import PAN115_QR_APP, PAN115_QR_TOKEN_URL, pan115_qr_image_url, pan115_qr_login_url
@@ -62,6 +62,30 @@ def test_share_url_parsers() -> None:
     assert QuarkAdapter.parse_share("https://pan.quark.cn/s/abc123", "") == ("abc123", "")
     assert Pan115Adapter.parse_share("https://115.com/s/xyz", "1234") == ("xyz", "1234")
     assert BaiduAdapter.parse_share("https://pan.baidu.com/s/1abc", "") == ("1abc", "abc", "")
+
+
+def test_115_delete_uses_async_safe_form_body(monkeypatch) -> None:
+    adapter = Pan115Adapter("UID=1; CID=2")
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return {"state": True}
+
+    monkeypatch.setattr(adapter, "request", fake_request)
+    asyncio.run(adapter.delete(["11", "22"]))
+    assert captured["content"] == b"fid%5B%5D=11&fid%5B%5D=22"
+    assert "data" not in captured
+
+
+def test_quark_delete_treats_already_deleted_as_success(monkeypatch) -> None:
+    adapter = QuarkAdapter("__puus=test")
+
+    async def fake_request(*args, **kwargs):
+        raise CloudError("夸克接口 400：[文件已经删除,请稍后重试]")
+
+    monkeypatch.setattr(adapter, "request", fake_request)
+    asyncio.run(adapter.delete(["gone"]))
 
 
 def test_baidu_extracts_real_share_metadata_from_locals_mset() -> None:
@@ -356,7 +380,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.20"
+    assert health["version"] == "1.0.21"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -494,6 +518,7 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert script.index("navigator.clipboard?.writeText") < script.index("legacyCopyText(value);return false")
     assert "data-job-retry" in script
     assert "data-temp-cleanup" in script
+    assert "百度分享缺少转存信息" in script
     assert "格式检查完成" in script
     assert "data-episode-file" in script
     assert "selected_file_ids:[]" in script

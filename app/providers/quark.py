@@ -313,7 +313,12 @@ class QuarkAdapter(CloudAdapter):
     async def delete(self, file_ids: list[str], file_paths: list[str] | None = None) -> None:
         if not file_ids:
             return
-        await self.request(
-            "POST", f"{self.api}/file/delete",
-            json={"action_type": 2, "filelist": file_ids, "exclude_fids": []},
-        )
+        try:
+            await self.request(
+                "POST", f"{self.api}/file/delete",
+                json={"action_type": 2, "filelist": file_ids, "exclude_fids": []},
+            )
+        except CloudError as error:
+            message = str(error)
+            if "文件已经删除" not in message and "文件已删除" not in message:
+                raise
