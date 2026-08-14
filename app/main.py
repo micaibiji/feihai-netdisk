@@ -191,6 +191,17 @@ async def _monitor_accounts() -> None:
 async def lifespan(_: FastAPI):
     store.initialize()
     vault.initialize()
+    recovered = store.recover_interrupted()
+    for temp_id in recovered["magnet_temp_ids"]:
+        magnet_service.safe_remove(magnet_service.cache_dir / temp_id)
+    if recovered["jobs"] or recovered["preparing"] or recovered["cleanup"]:
+        store.add_history(
+            "service_recovery",
+            "",
+            "服务重启恢复："
+            f"任务 {recovered['jobs']} 个，播放准备 {recovered['preparing']} 个，"
+            f"清理 {recovered['cleanup']} 个",
+        )
     cleanup = asyncio.create_task(_cleanup_expired())
     monitor = asyncio.create_task(_monitor_accounts())
     try:
@@ -204,7 +215,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.21", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.22", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -220,7 +231,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.21",
+        "version": "1.0.22",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,

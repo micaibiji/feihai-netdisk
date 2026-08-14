@@ -77,6 +77,66 @@ class Store:
                     (provider, utc_now()),
                 )
 
+    def recover_interrupted(self) -> dict[str, Any]:
+        """Make operations interrupted by a NAS/app restart actionable again.
+
+        Retrying a cloud save automatically could duplicate content, so jobs are
+        changed to failed and can be retried explicitly.  Temporary preparation
+        records are also failed so a new Play click can create a fresh task.
+        Cleanup work is safe to retry and is returned to the normal cleanup loop.
+        """
+        now = utc_now()
+        job_message = "NAS 或服务重启导致任务中断，请点击重试"
+        temp_message = "NAS 或服务重启导致播放准备中断，请重新点击播放"
+        cleanup_message = "NAS 或服务重启导致清理中断，系统将自动重试"
+        magnet_temp_ids: list[str] = []
+        with self.connect() as db:
+            interrupted_jobs = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM fh_jobs WHERE status IN ('queued','running')"
+                ).fetchone()[0]
+            )
+            db.execute(
+                "UPDATE fh_jobs SET status='failed',stage=?,error=?,updated_at=? "
+                "WHERE status IN ('queued','running')",
+                ("服务重启后已中断", job_message, now),
+            )
+
+            rows = db.execute(
+                "SELECT id,provider,state,direct_hint FROM fh_temp_media "
+                "WHERE state IN ('preparing','cleanup_pending')"
+            ).fetchall()
+            preparing_count = 0
+            cleanup_count = 0
+            for row in rows:
+                try:
+                    hint = json.loads(row["direct_hint"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    hint = {}
+                if row["state"] == "preparing":
+                    preparing_count += 1
+                    hint.update(
+                        {"progress": 0, "stage": "服务重启后准备已中断", "error": temp_message}
+                    )
+                    next_state = "failed"
+                    if row["provider"] == "magnet":
+                        magnet_temp_ids.append(str(row["id"]))
+                else:
+                    cleanup_count += 1
+                    hint["cleanup_error"] = cleanup_message
+                    hint.pop("last_cleanup_attempt_at", None)
+                    next_state = "cleanup_failed"
+                db.execute(
+                    "UPDATE fh_temp_media SET state=?,direct_hint=? WHERE id=?",
+                    (next_state, json.dumps(hint, ensure_ascii=False), row["id"]),
+                )
+        return {
+            "jobs": interrupted_jobs,
+            "preparing": preparing_count,
+            "cleanup": cleanup_count,
+            "magnet_temp_ids": magnet_temp_ids,
+        }
+
     def settings(self) -> dict[str, Any]:
         with self.connect() as db:
             rows = db.execute("SELECT key,value FROM fh_settings").fetchall()

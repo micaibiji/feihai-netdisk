@@ -248,6 +248,71 @@ def test_failed_temp_cleanup_is_retried_after_six_hours(tmp_path: Path) -> None:
     assert [item["id"] for item in store.expired_temps(now.isoformat())] == ["cleanup"]
 
 
+def test_restart_recovers_interrupted_jobs_and_temporary_tasks(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.db")
+    store.initialize()
+    now = datetime.now(UTC)
+    job = store.create_job("permanent_save", "baidu", "测试任务", {"title": "测试任务"})
+    store.update_job(job["id"], status="running", progress=45, stage="正在保存")
+    base_temp = {
+        "title": "测试", "share_url": "https://pan.quark.cn/s/abc",
+        "cloud_file_id": "f1", "file_name": "01.mp4",
+        "last_played_at": now.isoformat(),
+        "expires_at": (now - timedelta(hours=1)).isoformat(),
+        "created_at": now.isoformat(),
+    }
+    store.add_temp({
+        **base_temp, "id": "prepare-cloud", "provider": "quark", "state": "preparing",
+        "direct_hint": {"progress": 35, "source_file_id": "source"},
+    })
+    store.add_temp({
+        **base_temp, "id": "prepare-magnet", "provider": "magnet", "state": "preparing",
+        "direct_hint": {"progress": 20},
+    })
+    store.add_temp({
+        **base_temp, "id": "cleanup", "provider": "quark", "state": "cleanup_pending",
+        "direct_hint": {"last_cleanup_attempt_at": now.isoformat(), "path": "/影视临时播放/01.mp4"},
+    })
+
+    recovered = store.recover_interrupted()
+
+    interrupted = store.job(job["id"])
+    assert interrupted["status"] == "failed"
+    assert "重启" in interrupted["error"]
+    assert store.temp("prepare-cloud")["state"] == "failed"
+    assert "重新点击播放" in store.temp("prepare-cloud")["direct_hint"]["error"]
+    assert store.temp("prepare-magnet")["state"] == "failed"
+    assert recovered["magnet_temp_ids"] == ["prepare-magnet"]
+    cleanup = store.temp("cleanup")
+    assert cleanup["state"] == "cleanup_failed"
+    assert "last_cleanup_attempt_at" not in cleanup["direct_hint"]
+    assert [item["id"] for item in store.expired_temps(now.isoformat())] == ["cleanup"]
+    assert recovered == {
+        "jobs": 1, "preparing": 2, "cleanup": 1, "magnet_temp_ids": ["prepare-magnet"]
+    }
+
+
+def test_restart_recovery_keeps_finished_work_unchanged(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.db")
+    store.initialize()
+    job = store.create_job("permanent_save", "quark", "已完成", {})
+    store.update_job(job["id"], status="success", progress=100, stage="已完成")
+    now = datetime.now(UTC)
+    store.add_temp({
+        "id": "ready", "provider": "quark", "title": "测试",
+        "share_url": "https://pan.quark.cn/s/abc", "cloud_file_id": "f1",
+        "file_name": "01.mp4", "state": "ready", "direct_hint": {},
+        "last_played_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=48)).isoformat(), "created_at": now.isoformat(),
+    })
+
+    recovered = store.recover_interrupted()
+
+    assert recovered == {"jobs": 0, "preparing": 0, "cleanup": 0, "magnet_temp_ids": []}
+    assert store.job(job["id"])["status"] == "success"
+    assert store.temp("ready")["state"] == "ready"
+
+
 class FakeResponse:
     def __init__(self, body, status_code: int = 200):
         self._body = body
@@ -380,7 +445,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.21"
+    assert health["version"] == "1.0.22"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
