@@ -81,6 +81,11 @@ class BaiduAdapter(CloudAdapter):
         errno = body.get("errno", body.get("error_code", 0))
         if errno not in (None, 0):
             message = body.get("errmsg") or body.get("error_msg") or body.get("error_description") or f"错误码 {errno}"
+            if int(errno) == 200025:
+                message = (
+                    "百度拒绝了本次分享转存（错误码 200025）。请在“网盘账号”更新包含 "
+                    "BDUSS、STOKEN 的网页登录 Cookie 后重试；若仍失败，说明该分享受限，请更换来源"
+                )
             if int(errno) in (-6, 111, 401, 403):
                 raise AuthenticationError(f"百度授权已失效：{message}")
             raise CloudError(f"百度网盘：{message}")

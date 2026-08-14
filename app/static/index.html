@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.19">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.20">
 </head>
 <body>
   <header class="topbar">
@@ -116,8 +116,9 @@
       <form id="settingsForm" class="settings-grid">
         <article class="settings-card"><div class="settings-title"><span>搜</span><div><h2>资源搜索与检测</h2><p>连接你自己部署的服务</p></div></div><label>PanSou 地址<input id="pansouUrl" placeholder="http://192.168.100.213:8888"></label><label>网盘检测网站<input id="checkerUrl" placeholder="http://192.168.100.213:12110"></label></article>
         <article class="settings-card"><div class="settings-title"><span>影</span><div><h2>TMDB 影视数据</h2><p>海报、简介、排行与筛选</p></div></div><label>TMDB API 密钥 <a href="https://developer.themoviedb.org/docs/getting-started" target="_blank" rel="noreferrer">获取与填写教程 ↗</a><input id="tmdbKey" type="password" placeholder="已配置时留空不会覆盖"></label></article>
-        <article class="settings-card"><div class="settings-title"><span>通</span><div><h2>Telegram 通知</h2><p>永久保存完成后通知</p></div></div><label>Bot Token<input id="telegramToken" type="password" placeholder="已配置时留空不会覆盖"></label><label>Chat ID<input id="telegramChatId" placeholder="例如 123456789"></label></article>
+        <article class="settings-card"><div class="settings-title"><span>通</span><div><h2>Telegram 通知</h2><p id="telegramStatus">正在读取配置…</p></div></div><label>Bot Token<input id="telegramToken" type="password" placeholder="已配置时留空不会覆盖"></label><label>Chat ID<input id="telegramChatId" placeholder="例如 123456789"></label><button id="testTelegram" class="ghost full" type="button">发送测试通知</button></article>
         <article class="settings-card"><div class="settings-title"><span>安</span><div><h2>账号健康检查</h2><p>后台低频检查，异常时 Telegram 提醒一次</p></div></div><button id="checkAllAccounts" class="ghost full" type="button">立即检查全部网盘账号</button></article>
+        <article class="settings-card"><div class="settings-title"><span>密</span><div><h2>管理员安全</h2><p id="adminSessionPolicy">关闭浏览器后需要重新登录</p></div></div><p id="adminPasswordStatus" class="muted"></p></article>
         <article class="settings-card"><div class="settings-title"><span>备</span><div><h2>备份与恢复</h2><p>设置、追更、目录和加密凭证</p></div></div><p class="muted">备份中含可恢复凭证的密钥，请妥善保存，不要发给他人。</p><div class="backup-actions"><button id="downloadBackup" class="ghost" type="button">下载备份</button><button id="uploadBackup" class="ghost" type="button">恢复备份</button><input id="backupFile" class="hidden" type="file" accept="application/json,.json"></div></article>
         <button class="primary save-settings" type="submit">保存设置</button>
       </form>
@@ -131,6 +132,7 @@
   </dialog>
 
   <dialog id="introDialog" class="modal intro-modal"><button class="modal-close" data-close>×</button><div id="introContent"></div></dialog>
+  <dialog id="copyDialog" class="modal small-modal copy-modal"><button class="modal-close" data-close>×</button><p class="eyebrow">复制分享链接</p><h2>浏览器未允许自动复制</h2><p>链接已经选中。电脑按 Ctrl+C，手机长按文字选择“复制”。</p><textarea id="copyValue" rows="5" readonly></textarea><div class="copy-actions"><button id="selectCopyValue" class="ghost" type="button">重新选中</button><button id="systemShare" class="primary hidden" type="button">系统分享</button></div></dialog>
   <dialog id="playDialog" class="modal player-modal">
     <button class="modal-close light" data-close>×</button>
     <div class="player-layout">
@@ -155,6 +157,6 @@
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js?v=1.0.19" defer></script>
+  <script src="/static/app.js?v=1.0.20" defer></script>
 </body>
 </html>

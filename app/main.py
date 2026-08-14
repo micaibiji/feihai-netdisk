@@ -52,10 +52,14 @@ store = Store(settings.database_path)
 vault = CredentialVault(settings.data_dir)
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "feihai_admin"
-SESSION_SECONDS = 7 * 24 * 60 * 60
+# The cookie itself is session-only (removed when the browser closes).  The
+# signed payload also expires, so a browser left open cannot stay privileged
+# forever.
+SESSION_SECONDS = 12 * 60 * 60
 _qr_sessions: dict[str, dict[str, Any]] = {}
 _inspect_cache: dict[str, tuple[float, Any]] = {}
 _play_rate: dict[str, deque[float]] = defaultdict(deque)
+_login_attempts: dict[str, deque[float]] = defaultdict(deque)
 _magnet_tasks: dict[str, asyncio.Task[None]] = {}
 _cloud_play_tasks: dict[str, asyncio.Task[None]] = {}
 magnet_service = MagnetService(settings.data_dir, settings.magnet_max_bytes)
@@ -129,21 +133,35 @@ def _cloud_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="操作失败，请查看任务记录")
 
 
+async def _cleanup_temp_item(item: dict[str, Any], *, raise_error: bool = False) -> bool:
+    hint = dict(item.get("direct_hint") or {})
+    hint["cleanup_attempts"] = int(hint.get("cleanup_attempts") or 0) + 1
+    hint["last_cleanup_attempt_at"] = utc_now()
+    hint.pop("cleanup_error", None)
+    store.update_temp(item["id"], state="cleanup_pending", direct_hint=hint)
+    try:
+        if item["provider"] == "magnet":
+            magnet_service.safe_remove(hint.get("local_path", ""))
+        else:
+            adapter = _adapter(item["provider"])
+            await adapter.delete([item["cloud_file_id"]], [hint.get("path", "")])
+        store.set_temp_state(item["id"], "deleted")
+        store.add_history("temp_cleanup", item["provider"], f"已清理 {item['file_name']}")
+        return True
+    except Exception as error:
+        hint["cleanup_error"] = str(error)[:300]
+        store.update_temp(item["id"], state="cleanup_failed", direct_hint=hint)
+        store.add_history("temp_cleanup_failed", item["provider"], str(error)[:300])
+        if raise_error:
+            raise
+        return False
+
+
 async def _cleanup_expired() -> None:
     await asyncio.sleep(5)
     while True:
         for item in store.expired_temps(utc_now()):
-            try:
-                if item["provider"] == "magnet":
-                    magnet_service.safe_remove(item["direct_hint"].get("local_path", ""))
-                else:
-                    adapter = _adapter(item["provider"])
-                    await adapter.delete([item["cloud_file_id"]], [item["direct_hint"].get("path", "")])
-                store.set_temp_state(item["id"], "deleted")
-                store.add_history("temp_cleanup", item["provider"], f"已清理 {item['file_name']}")
-            except Exception as error:
-                store.set_temp_state(item["id"], "cleanup_failed")
-                store.add_history("temp_cleanup_failed", item["provider"], str(error)[:300])
+            await _cleanup_temp_item(item)
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
@@ -186,7 +204,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.20", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -202,7 +220,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.19",
+        "version": "1.0.20",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -217,17 +235,25 @@ def session(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/login")
-def login(payload: LoginRequest) -> JSONResponse:
+def login(payload: LoginRequest, request: Request) -> JSONResponse:
+    client_key = request.client.host if request.client else "unknown"
+    attempts = _login_attempts[client_key]
+    now = time.time()
+    while attempts and attempts[0] < now - 10 * 60:
+        attempts.popleft()
+    if len(attempts) >= 10:
+        raise HTTPException(status_code=429, detail="登录失败次数过多，请 10 分钟后再试")
     if not (
         _safe_equal(payload.username, settings.admin_username)
         and _safe_equal(payload.password, settings.admin_password)
     ):
+        attempts.append(now)
         raise HTTPException(status_code=401, detail="管理员账号或密码不正确")
+    attempts.clear()
     response = JSONResponse({"ok": True, "username": payload.username})
     response.set_cookie(
         SESSION_COOKIE,
         _session_token(payload.username),
-        max_age=SESSION_SECONDS,
         httponly=True,
         samesite="lax",
         path="/",
@@ -1103,9 +1129,50 @@ def jobs(_: str = Depends(require_admin)) -> dict[str, Any]:
     return {"items": store.jobs()}
 
 
+@app.post("/api/admin/jobs/{job_id}/retry")
+async def retry_job(job_id: int, background: BackgroundTasks, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        job = store.job(job_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    if job["status"] != "failed":
+        raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+    if job["kind"] not in {"permanent_save", "keep_temporary"}:
+        raise HTTPException(status_code=409, detail="这个任务暂不支持重试")
+    try:
+        payload = TransferRequest.model_validate(job["detail"])
+    except Exception as error:
+        raise HTTPException(status_code=409, detail="任务参数已过期，请从资源搜索重新保存") from error
+    updated = store.update_job(
+        job_id,
+        status="queued",
+        progress=0,
+        stage="等待重试",
+        error="",
+        retry_count=int(job.get("retry_count") or 0) + 1,
+    )
+    background.add_task(_run_save_job, job_id, payload)
+    return updated
+
+
 @app.get("/api/admin/temporary")
 def temporary(_: str = Depends(require_admin)) -> dict[str, Any]:
     return {"items": store.temps()}
+
+
+@app.post("/api/admin/temporary/{temp_id}/cleanup")
+async def retry_temporary_cleanup(temp_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        item = store.temp(temp_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="临时文件不存在") from error
+    if item["state"] in {"deleted", "kept"}:
+        return {"ok": True, "state": item["state"], "message": "该临时文件已经处理"}
+    try:
+        await _cleanup_temp_item(item, raise_error=True)
+    except Exception as error:
+        raise _cloud_error(error) from error
+    return {"ok": True, "state": "deleted", "message": "临时文件已清理"}
 
 
 @app.get("/api/admin/temporary/{temp_id}/playback-diagnostics")
@@ -1199,11 +1266,16 @@ async def keep_temporary(temp_id: str, payload: KeepTemporaryRequest, background
 @app.get("/api/admin/integrations")
 def get_integrations(_: str = Depends(require_admin)) -> dict[str, Any]:
     values = _integration_values()
+    weak_password = len(settings.admin_password) < 10 or settings.admin_password.lower() in {
+        "admin", "password", "123456", "change-me-now",
+    }
     return {
         "pansou_url": values["pansou_url"],
         "checker_url": values["checker_url"],
         "tmdb_configured": bool(values["tmdb_api_key"]),
         "telegram_configured": bool(values["telegram_bot_token"] and values["telegram_chat_id"]),
+        "admin_password_weak": weak_password,
+        "admin_session_policy": "关闭浏览器后需要重新登录，最长 12 小时",
         "tmdb_guide": "https://developer.themoviedb.org/docs/getting-started",
         "rules": {"hide_only_explicit_invalid": True, "single_port": 12366},
     }
@@ -1219,6 +1291,24 @@ def save_integrations(payload: IntegrationSettingsRequest, _: str = Depends(requ
     if payload.telegram_chat_id:
         vault.save("telegram_chat_id", payload.telegram_chat_id)
     return get_integrations(_)
+
+
+@app.post("/api/admin/integrations/telegram/test")
+async def test_telegram(_: str = Depends(require_admin)) -> dict[str, Any]:
+    values = _integration_values()
+    if not values["telegram_bot_token"] or not values["telegram_chat_id"]:
+        raise HTTPException(status_code=409, detail="请先填写并保存 Telegram Bot Token 和 Chat ID")
+    try:
+        sent = await send_telegram(
+            values["telegram_bot_token"],
+            values["telegram_chat_id"],
+            "飞海网盘测试通知：Telegram 连接正常。",
+        )
+    except Exception as error:
+        raise HTTPException(status_code=422, detail=f"Telegram 发送失败：{str(error)[:240]}") from error
+    if not sent:
+        raise HTTPException(status_code=409, detail="Telegram 尚未配置")
+    return {"ok": True, "message": "测试通知已发送"}
 
 
 @app.post("/api/admin/subscriptions")

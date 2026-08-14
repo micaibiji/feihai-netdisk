@@ -192,11 +192,25 @@ class Store:
 
     def expired_temps(self, now: str) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM fh_temp_media WHERE state='ready' AND expires_at<=?", (now,)).fetchall()
+            rows = db.execute(
+                "SELECT * FROM fh_temp_media WHERE state IN ('ready','cleanup_failed') AND expires_at<=?",
+                (now,),
+            ).fetchall()
         output = []
+        now_dt = datetime.fromisoformat(now)
         for row in rows:
             item = dict(row)
             item["direct_hint"] = json.loads(item["direct_hint"])
+            # Failed cleanups are retried automatically, but no more than once
+            # every six hours so an expired credential cannot hammer a provider.
+            if item["state"] == "cleanup_failed":
+                last_attempt = str(item["direct_hint"].get("last_cleanup_attempt_at") or "")
+                if last_attempt:
+                    try:
+                        if (now_dt - datetime.fromisoformat(last_attempt)).total_seconds() < 6 * 60 * 60:
+                            continue
+                    except ValueError:
+                        pass
             output.append(item)
         return output
 

@@ -205,6 +205,25 @@ def test_temp_last_played_can_be_extended(tmp_path: Path) -> None:
     assert store.temp("one")["last_played_at"] == later.isoformat()
 
 
+def test_failed_temp_cleanup_is_retried_after_six_hours(tmp_path: Path) -> None:
+    store = Store(tmp_path / "test.db")
+    store.initialize()
+    now = datetime.now(UTC)
+    store.add_temp(
+        {
+            "id": "cleanup", "provider": "quark", "title": "测试",
+            "share_url": "https://pan.quark.cn/s/abc", "cloud_file_id": "f1",
+            "file_name": "测试.mp4", "state": "cleanup_failed",
+            "direct_hint": {"last_cleanup_attempt_at": now.isoformat()},
+            "last_played_at": (now - timedelta(days=3)).isoformat(),
+            "expires_at": (now - timedelta(days=1)).isoformat(), "created_at": now.isoformat(),
+        }
+    )
+    assert store.expired_temps(now.isoformat()) == []
+    store.update_temp("cleanup", direct_hint={"last_cleanup_attempt_at": (now - timedelta(hours=7)).isoformat()})
+    assert [item["id"] for item in store.expired_temps(now.isoformat())] == ["cleanup"]
+
+
 class FakeResponse:
     def __init__(self, body, status_code: int = 200):
         self._body = body
@@ -337,7 +356,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.19"
+    assert health["version"] == "1.0.20"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -346,7 +365,9 @@ def test_public_health_and_admin_boundary(web_client) -> None:
         json={"username": main.settings.admin_username, "password": main.settings.admin_password},
     )
     assert response.status_code == 200
+    assert "max-age" not in response.headers["set-cookie"].lower()
     assert client.get("/api/admin/overview").status_code == 200
+    assert client.post("/api/admin/integrations/telegram/test").status_code == 409
 
 
 def test_index_disables_referer(web_client) -> None:
@@ -452,6 +473,7 @@ def test_static_page_has_guest_copy_and_no_public_directory(web_client) -> None:
     assert "公开目录" not in html
     assert "OpenList" not in html
     assert 'id="episodeList"' in html
+    assert 'id="copyDialog"' in html
 
 
 def test_compose_exposes_only_product_port() -> None:
@@ -469,6 +491,10 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert script.count("document.addEventListener('click'") == 1
     assert 'data-intro-search="${esc(media.title||item.title)}"' in script
     assert "document.execCommand('copy')" in script
+    assert script.index("navigator.clipboard?.writeText") < script.index("legacyCopyText(value);return false")
+    assert "data-job-retry" in script
+    assert "data-temp-cleanup" in script
+    assert "格式检查完成" in script
     assert "data-episode-file" in script
     assert "selected_file_ids:[]" in script
     assert "保存原始分享的全部内容" in script
@@ -497,3 +523,4 @@ def test_mobile_layout_has_compact_navigation_and_filters() -> None:
     assert ".resource-grid .resource-actions{grid-template-columns:repeat(2,minmax(0,1fr))" in css
     assert ".resource-grid .resource-card:hover{box-shadow:" in css
     assert ".resource-grid .resource-card:hover{transform:" not in css
+    assert ".player-layout{grid-template-columns:1fr;grid-template-rows:auto auto;height:auto" in css
