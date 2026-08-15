@@ -12,18 +12,20 @@ class Settings:
     admin_username: str
     admin_password: str
     data_dir: Path
-    strm_dir: Path
+    pansou_url: str
+    checker_url: str
     tmdb_api_key: str
     telegram_bot_token: str
     telegram_chat_id: str
-    wecom_webhook_url: str
-    pansou_base_url: str
-    provider_priority: tuple[str, ...]
-    subscription_interval_seconds: int
+    public_base_url: str
+    temp_retention_hours: int
+    temp_folder_name: str
+    cleanup_interval_seconds: int
+    magnet_max_bytes: int
 
     @property
     def database_path(self) -> Path:
-        return self.data_dir / "feihai.db"
+        return self.data_dir / "feihai-v1.db"
 
 
 @lru_cache
@@ -33,18 +35,14 @@ def get_settings() -> Settings:
         admin_username=os.getenv("ADMIN_USERNAME", "admin"),
         admin_password=os.getenv("ADMIN_PASSWORD", "change-me-now"),
         data_dir=Path(os.getenv("DATA_DIR", "data")).resolve(),
-        strm_dir=Path(os.getenv("STRM_DIR", "strm")).resolve(),
+        pansou_url=os.getenv("PANSOU_URL", "").rstrip("/"),
+        checker_url=os.getenv("CHECKER_URL", "").rstrip("/"),
         tmdb_api_key=os.getenv("TMDB_API_KEY", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        wecom_webhook_url=os.getenv("WECOM_WEBHOOK_URL", ""),
-        pansou_base_url=os.getenv("PANSOU_BASE_URL", "http://pansou:8888").rstrip("/"),
-        provider_priority=tuple(
-            item.strip()
-            for item in os.getenv("PROVIDER_PRIORITY", "115,baidu,quark,china_mobile").split(",")
-            if item.strip()
-        ),
-        subscription_interval_seconds=max(
-            300, int(os.getenv("SUBSCRIPTION_INTERVAL_SECONDS", "1800"))
-        ),
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").rstrip("/"),
+        temp_retention_hours=max(1, int(os.getenv("TEMP_RETENTION_HOURS", "48"))),
+        temp_folder_name=os.getenv("TEMP_FOLDER_NAME", "影视临时播放").strip() or "影视临时播放",
+        cleanup_interval_seconds=max(60, int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))),
+        magnet_max_bytes=max(1, int(float(os.getenv("MAGNET_MAX_GB", "30")) * 1024 * 1024 * 1024)),
     )

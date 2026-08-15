@@ -7,139 +7,398 @@ from pathlib import Path
 from typing import Any
 
 
-class JobStore:
-    def __init__(self, database_path: Path):
-        self.database_path = database_path
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
 
-    def initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    detail TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    keyword TEXT NOT NULL UNIQUE,
-                    auto_intake INTEGER NOT NULL DEFAULT 1,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    last_checked_at TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS seen_resources (
-                    fingerprint TEXT PRIMARY KEY,
-                    subscription_id INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+class Store:
+    """Versioned SQLite store. The fh_ prefix isolates the rewritten application."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=15)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
-    def create(
-        self,
-        *,
-        kind: str,
-        provider: str,
-        title: str,
-        status: str,
-        detail: dict[str, Any],
-    ) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            cursor = connection.execute(
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as db:
+            db.executescript(
                 """
-                INSERT INTO jobs(kind, provider, title, status, detail, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (kind, provider, title, status, json.dumps(detail, ensure_ascii=False), now, now),
+                CREATE TABLE IF NOT EXISTS fh_settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_accounts (
+                    provider TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'disconnected',
+                    account_label TEXT NOT NULL DEFAULT '', credential_kind TEXT NOT NULL DEFAULT '',
+                    risk_status TEXT NOT NULL DEFAULT 'unknown', last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                    provider TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0, stage TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_temp_media (
+                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, title TEXT NOT NULL,
+                    share_url TEXT NOT NULL, extraction_code TEXT NOT NULL DEFAULT '',
+                    cloud_file_id TEXT NOT NULL, cloud_parent_id TEXT NOT NULL DEFAULT '',
+                    file_name TEXT NOT NULL, mime_type TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0,
+                    direct_hint TEXT NOT NULL DEFAULT '{}', last_played_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready',
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_last_directories (
+                    provider TEXT PRIMARY KEY, folder_id TEXT NOT NULL DEFAULT '',
+                    folder_path TEXT NOT NULL DEFAULT '/', updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL UNIQUE,
+                    media_type TEXT NOT NULL DEFAULT 'tv', year INTEGER,
+                    enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fh_operation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+            for provider in ("baidu", "quark", "115", "china_mobile"):
+                db.execute(
+                    "INSERT OR IGNORE INTO fh_accounts(provider,updated_at) VALUES (?,?)",
+                    (provider, utc_now()),
+                )
+
+    def recover_interrupted(self) -> dict[str, Any]:
+        """Make operations interrupted by a NAS/app restart actionable again.
+
+        Retrying a cloud save automatically could duplicate content, so jobs are
+        changed to failed and can be retried explicitly.  Temporary preparation
+        records are also failed so a new Play click can create a fresh task.
+        Cleanup work is safe to retry and is returned to the normal cleanup loop.
+        """
+        now = utc_now()
+        job_message = "NAS 或服务重启导致任务中断，请点击重试"
+        temp_message = "NAS 或服务重启导致播放准备中断，请重新点击播放"
+        cleanup_message = "NAS 或服务重启导致清理中断，系统将自动重试"
+        magnet_temp_ids: list[str] = []
+        with self.connect() as db:
+            interrupted_jobs = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM fh_jobs WHERE status IN ('queued','running')"
+                ).fetchone()[0]
+            )
+            db.execute(
+                "UPDATE fh_jobs SET status='failed',stage=?,error=?,updated_at=? "
+                "WHERE status IN ('queued','running')",
+                ("服务重启后已中断", job_message, now),
+            )
+
+            rows = db.execute(
+                "SELECT id,provider,state,direct_hint FROM fh_temp_media "
+                "WHERE state IN ('preparing','cleanup_pending')"
+            ).fetchall()
+            preparing_count = 0
+            cleanup_count = 0
+            for row in rows:
+                try:
+                    hint = json.loads(row["direct_hint"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    hint = {}
+                if row["state"] == "preparing":
+                    preparing_count += 1
+                    hint.update(
+                        {"progress": 0, "stage": "服务重启后准备已中断", "error": temp_message}
+                    )
+                    next_state = "failed"
+                    if row["provider"] == "magnet":
+                        magnet_temp_ids.append(str(row["id"]))
+                else:
+                    cleanup_count += 1
+                    hint["cleanup_error"] = cleanup_message
+                    hint.pop("last_cleanup_attempt_at", None)
+                    next_state = "cleanup_failed"
+                db.execute(
+                    "UPDATE fh_temp_media SET state=?,direct_hint=? WHERE id=?",
+                    (next_state, json.dumps(hint, ensure_ascii=False), row["id"]),
+                )
+        return {
+            "jobs": interrupted_jobs,
+            "preparing": preparing_count,
+            "cleanup": cleanup_count,
+            "magnet_temp_ids": magnet_temp_ids,
+        }
+
+    def settings(self) -> dict[str, Any]:
+        with self.connect() as db:
+            rows = db.execute("SELECT key,value FROM fh_settings").fetchall()
+        return {row["key"]: json.loads(row["value"]) for row in rows}
+
+    def save_settings(self, values: dict[str, Any]) -> None:
+        with self.connect() as db:
+            for key, value in values.items():
+                db.execute(
+                    "INSERT INTO fh_settings(key,value,updated_at) VALUES (?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                    (key, json.dumps(value, ensure_ascii=False), utc_now()),
+                )
+
+    def accounts(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM fh_accounts").fetchall()
+        return [dict(row) for row in rows]
+
+    def update_account(self, provider: str, **values: Any) -> dict[str, Any]:
+        allowed = {"state", "account_label", "credential_kind", "risk_status", "last_error"}
+        clean = {key: value for key, value in values.items() if key in allowed}
+        clean["updated_at"] = utc_now()
+        with self.connect() as db:
+            db.execute(
+                f"UPDATE fh_accounts SET {','.join(f'{key}=?' for key in clean)} WHERE provider=?",
+                (*clean.values(), provider),
+            )
+            row = db.execute("SELECT * FROM fh_accounts WHERE provider=?", (provider,)).fetchone()
+        return dict(row)
+
+    def create_job(self, kind: str, provider: str, title: str, detail: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as db:
+            cursor = db.execute(
+                "INSERT INTO fh_jobs(kind,provider,title,status,detail,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (kind, provider, title, "queued", json.dumps(detail, ensure_ascii=False), now, now),
             )
             job_id = int(cursor.lastrowid)
-        return self.get(job_id)
+        return self.job(job_id)
 
-    def get(self, job_id: int) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if row is None:
+    def job(self, job_id: int) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM fh_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
             raise KeyError(job_id)
-        return self._serialize(row)
-
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),)
-            ).fetchall()
-        return [self._serialize(row) for row in rows]
-
-    def create_subscription(self, keyword: str, auto_intake: bool = True) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO subscriptions(keyword, auto_intake, enabled, created_at)
-                VALUES (?, ?, 1, ?)
-                ON CONFLICT(keyword) DO UPDATE SET auto_intake=excluded.auto_intake, enabled=1
-                """,
-                (keyword.strip(), int(auto_intake), now),
-            )
-            row = connection.execute(
-                "SELECT * FROM subscriptions WHERE keyword = ?", (keyword.strip(),)
-            ).fetchone()
-        return self._serialize_subscription(row)
-
-    def list_subscriptions(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM subscriptions ORDER BY id DESC"
-            ).fetchall()
-        return [self._serialize_subscription(row) for row in rows]
-
-    def mark_checked(self, subscription_id: int) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE subscriptions SET last_checked_at = ? WHERE id = ?",
-                (datetime.now(UTC).isoformat(), subscription_id),
-            )
-
-    def mark_seen(self, subscription_id: int, fingerprint: str) -> bool:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO seen_resources(fingerprint, subscription_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (fingerprint, subscription_id, datetime.now(UTC).isoformat()),
-            )
-        return cursor.rowcount == 1
-
-    @staticmethod
-    def _serialize(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["detail"] = json.loads(item["detail"])
         return item
 
-    @staticmethod
-    def _serialize_subscription(row: sqlite3.Row) -> dict[str, Any]:
+    def update_job(self, job_id: int, **values: Any) -> dict[str, Any]:
+        allowed = {"status", "progress", "stage", "detail", "error", "retry_count"}
+        clean = {key: value for key, value in values.items() if key in allowed}
+        if "detail" in clean:
+            clean["detail"] = json.dumps(clean["detail"], ensure_ascii=False)
+        clean["updated_at"] = utc_now()
+        with self.connect() as db:
+            db.execute(
+                f"UPDATE fh_jobs SET {','.join(f'{key}=?' for key in clean)} WHERE id=?",
+                (*clean.values(), job_id),
+            )
+        return self.job(job_id)
+
+    def jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM fh_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item["detail"])
+            output.append(item)
+        return output
+
+    def save_last_directory(self, provider: str, folder_id: str, folder_path: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO fh_last_directories(provider,folder_id,folder_path,updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(provider) DO UPDATE SET folder_id=excluded.folder_id,folder_path=excluded.folder_path,updated_at=excluded.updated_at",
+                (provider, folder_id, folder_path, utc_now()),
+            )
+
+    def last_directories(self) -> dict[str, dict[str, str]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM fh_last_directories").fetchall()
+        return {row["provider"]: dict(row) for row in rows}
+
+    def add_temp(self, item: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO fh_temp_media(
+                id,provider,title,share_url,extraction_code,cloud_file_id,cloud_parent_id,
+                file_name,mime_type,size,direct_hint,last_played_at,expires_at,state,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (item["id"], item["provider"], item["title"], item["share_url"], item.get("extraction_code", ""),
+                 item["cloud_file_id"], item.get("cloud_parent_id", ""), item["file_name"], item.get("mime_type", ""),
+                 int(item.get("size", 0)), json.dumps(item.get("direct_hint", {}), ensure_ascii=False),
+                 item["last_played_at"], item["expires_at"], item.get("state", "ready"), item["created_at"]),
+            )
+        return self.temp(item["id"])
+
+    def temp(self, temp_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM fh_temp_media WHERE id=?", (temp_id,)).fetchone()
+        if not row:
+            raise KeyError(temp_id)
         item = dict(row)
-        item["auto_intake"] = bool(item["auto_intake"])
-        item["enabled"] = bool(item["enabled"])
+        item["direct_hint"] = json.loads(item["direct_hint"])
         return item
+
+    def touch_temp(self, temp_id: str, last_played_at: str, expires_at: str) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE fh_temp_media SET last_played_at=?,expires_at=? WHERE id=?", (last_played_at, expires_at, temp_id))
+
+    def expired_temps(self, now: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM fh_temp_media WHERE state IN ('ready','cleanup_failed') AND expires_at<=?",
+                (now,),
+            ).fetchall()
+        output = []
+        now_dt = datetime.fromisoformat(now)
+        for row in rows:
+            item = dict(row)
+            item["direct_hint"] = json.loads(item["direct_hint"])
+            # Failed cleanups are retried automatically, but no more than once
+            # every six hours so an expired credential cannot hammer a provider.
+            if item["state"] == "cleanup_failed":
+                last_attempt = str(item["direct_hint"].get("last_cleanup_attempt_at") or "")
+                if last_attempt:
+                    try:
+                        if (now_dt - datetime.fromisoformat(last_attempt)).total_seconds() < 6 * 60 * 60:
+                            continue
+                    except ValueError:
+                        pass
+            output.append(item)
+        return output
+
+    def temps(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM fh_temp_media ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["direct_hint"] = json.loads(item["direct_hint"])
+            output.append(item)
+        return output
+
+    def find_ready_temp(self, provider: str, share_url: str, file_name: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM fh_temp_media WHERE provider=? AND share_url=? AND file_name=? "
+                "AND state='ready' ORDER BY created_at DESC LIMIT 1",
+                (provider, share_url, file_name),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["direct_hint"] = json.loads(item["direct_hint"])
+        return item
+
+    def find_temp(self, provider: str, share_url: str, file_name: str, states: tuple[str, ...] = ("preparing",)) -> dict[str, Any] | None:
+        placeholders = ",".join("?" for _ in states)
+        with self.connect() as db:
+            row = db.execute(
+                f"SELECT * FROM fh_temp_media WHERE provider=? AND share_url=? AND file_name=? "
+                f"AND state IN ({placeholders}) ORDER BY created_at DESC LIMIT 1",
+                (provider, share_url, file_name, *states),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["direct_hint"] = json.loads(item["direct_hint"])
+        return item
+
+    def update_temp(self, temp_id: str, *, state: str | None = None, direct_hint: dict[str, Any] | None = None) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if state is not None:
+            values["state"] = state
+        if direct_hint is not None:
+            values["direct_hint"] = json.dumps(direct_hint, ensure_ascii=False)
+        if values:
+            with self.connect() as db:
+                db.execute(
+                    f"UPDATE fh_temp_media SET {','.join(f'{key}=?' for key in values)} WHERE id=?",
+                    (*values.values(), temp_id),
+                )
+        return self.temp(temp_id)
+
+    def set_temp_state(self, temp_id: str, state: str) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE fh_temp_media SET state=? WHERE id=?", (state, temp_id))
+
+    def add_subscription(self, title: str, media_type: str, year: int | None) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO fh_subscriptions(title,media_type,year,created_at,updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(title) DO UPDATE SET media_type=excluded.media_type,year=excluded.year,enabled=1,updated_at=excluded.updated_at",
+                (title, media_type, year, now, now),
+            )
+            row = db.execute("SELECT * FROM fh_subscriptions WHERE title=?", (title,)).fetchone()
+        return dict(row)
+
+    def subscriptions(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM fh_subscriptions ORDER BY id DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_subscription(self, subscription_id: int) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM fh_subscriptions WHERE id=?", (subscription_id,))
+
+    def add_history(self, action: str, provider: str, summary: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO fh_operation_history(action,provider,summary,created_at) VALUES (?,?,?,?)",
+                (action, provider, summary, utc_now()),
+            )
+
+    def history(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM fh_operation_history ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def export_portable(self) -> dict[str, Any]:
+        with self.connect() as db:
+            settings = [dict(row) for row in db.execute("SELECT * FROM fh_settings").fetchall()]
+            accounts = [dict(row) for row in db.execute("SELECT * FROM fh_accounts").fetchall()]
+            subscriptions = [dict(row) for row in db.execute("SELECT * FROM fh_subscriptions").fetchall()]
+            directories = [dict(row) for row in db.execute("SELECT * FROM fh_last_directories").fetchall()]
+        return {"settings": settings, "accounts": accounts, "subscriptions": subscriptions, "directories": directories}
+
+    def restore_portable(self, payload: dict[str, Any]) -> None:
+        with self.connect() as db:
+            for row in payload.get("settings", []):
+                if isinstance(row, dict) and row.get("key") and "value" in row:
+                    db.execute(
+                        "INSERT INTO fh_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (str(row["key"]), str(row["value"]), utc_now()),
+                    )
+            for row in payload.get("accounts", []):
+                if isinstance(row, dict) and row.get("provider") in {"baidu", "quark", "115", "china_mobile"}:
+                    db.execute(
+                        "UPDATE fh_accounts SET state=?,account_label=?,credential_kind=?,risk_status=?,last_error=?,updated_at=? WHERE provider=?",
+                        (str(row.get("state") or "disconnected"), str(row.get("account_label") or ""),
+                         str(row.get("credential_kind") or ""), str(row.get("risk_status") or "unknown"),
+                         str(row.get("last_error") or ""), utc_now(), str(row["provider"])),
+                    )
+            for row in payload.get("subscriptions", []):
+                if isinstance(row, dict) and row.get("title"):
+                    now = utc_now()
+                    db.execute(
+                        "INSERT INTO fh_subscriptions(title,media_type,year,created_at,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(title) DO UPDATE SET media_type=excluded.media_type,year=excluded.year,enabled=1,updated_at=excluded.updated_at",
+                        (str(row["title"]), str(row.get("media_type") or "tv"), row.get("year"), now, now),
+                    )
+            for row in payload.get("directories", []):
+                if isinstance(row, dict) and row.get("provider"):
+                    db.execute(
+                        "INSERT INTO fh_last_directories(provider,folder_id,folder_path,updated_at) VALUES (?,?,?,?) ON CONFLICT(provider) DO UPDATE SET folder_id=excluded.folder_id,folder_path=excluded.folder_path,updated_at=excluded.updated_at",
+                        (str(row["provider"]), str(row.get("folder_id") or ""), str(row.get("folder_path") or "/"), utc_now()),
+                    )

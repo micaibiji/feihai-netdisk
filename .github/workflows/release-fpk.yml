@@ -1,0 +1,60 @@
+name: 发布飞牛 FPK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装检查依赖
+        run: pip install -r requirements-dev.txt
+
+      - name: 核对标签与应用版本
+        shell: bash
+        run: |
+          VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}" || {
+            echo "标签 ${GITHUB_REF_NAME} 与应用版本 ${VERSION} 不一致"
+            exit 1
+          }
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: 运行自动检查
+        run: |
+          python -m pytest -q
+          node --check app/static/app.js
+
+      - name: 构建 FPK 与更新元数据
+        run: python deploy-fnos/build_fpk.py
+
+      - name: 确认软件源版本已经提交
+        run: git diff --exit-code -- micaibiji.json
+
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          FPK="deploy-fnos/dist/feihai-drive_${VERSION}_all.fpk"
+          gh release create "${GITHUB_REF_NAME}" \
+            "$FPK" \
+            "${FPK}.sha256" \
+            "deploy-fnos/dist/latest.json" \
+            --verify-tag \
+            --title "飞海网盘 ${VERSION}" \
+            --generate-notes

@@ -1,0 +1,34 @@
+name: 代码与安装包检查
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装检查依赖
+        run: pip install -r requirements-dev.txt
+
+      - name: 检查后端与前端
+        run: |
+          python -m pytest -q
+          node --check app/static/app.js
+
+      - name: 构建并校验飞牛安装包
+        run: python deploy-fnos/build_fpk.py
+
+      - name: 确认软件源版本已经同步
+        run: git diff --exit-code -- micaibiji.json
