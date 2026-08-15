@@ -157,7 +157,8 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .main-nav button{font-size:12px}.hero{padding:26px 18px}.hero h1{font-size:31px}
 }
 
-/* 1.0.32：115 HLS 播放器随应用本地打包，并优先选择 1080P 立体声音轨。 */
+/* 1.0.33：按分享目录中的真实视频文件显示实际更新集数。 */
+.chip.actual-progress{background:#dff8eb;color:#007947;font-weight:800}.chip.actual-progress.pending{background:#eef2f0;color:#617069;font-weight:650}
 .modal{z-index:1000}
 .toast{inset:24px auto auto 50%;bottom:auto;width:max-content;max-width:min(680px,calc(100vw - 32px));margin:0;border:1px solid rgba(255,255,255,.18);transform:translate(-50%,-18px);padding:14px 20px;box-shadow:0 16px 55px rgba(0,0,0,.38);z-index:2147483647;text-align:center;line-height:1.55}
 .toast.show,.toast:popover-open.show{opacity:1;transform:translate(-50%,0)}

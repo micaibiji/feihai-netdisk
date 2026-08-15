@@ -70,6 +70,7 @@ class ShareInspection:
             "title": self.title,
             "files": [item.public() for item in self.files],
             "playable_count": sum(1 for item in self.files if item.browser.playable),
+            "episode_progress": episode_progress(self.files),
         }
 
 
@@ -109,10 +110,92 @@ def join_path(parent: str, name: str) -> str:
 
 
 _VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".mov"}
+_ALL_VIDEO_EXTENSIONS = {
+    ".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".ts", ".m2ts",
+    ".mts", ".flv", ".wmv", ".rm", ".rmvb", ".mpg", ".mpeg", ".vob",
+}
 _BLOCKED_VIDEO_MARKERS = (
     "hevc", "h265", "h.265", "dolby vision", "dolby.vision", "杜比视界", "dovi", "dv.",
     "truehd", "dts-hd", "dts:x", "av1", "10bit", "10-bit",
 )
+
+_SEASON_EPISODE_PATTERNS = (
+    re.compile(r"(?<![0-9A-Za-z])S\s*0*(?P<season>\d{1,2})[\s._-]*E\s*0*(?P<episode>\d{1,4})(?!\d)", re.I),
+    re.compile(r"第\s*(?P<season>\d{1,2})\s*季.*?第\s*(?P<episode>\d{1,4})\s*[集话]"),
+)
+_EPISODE_ONLY_PATTERNS = (
+    re.compile(r"第\s*0*(?P<episode>\d{1,4})\s*[集话]"),
+    re.compile(r"(?:^|[\s._/\-\[(])EP?\s*0*(?P<episode>\d{1,4})(?=$|[\s._/\-\])])", re.I),
+)
+_SEASON_PATH_PATTERNS = (
+    re.compile(r"(?:^|/)(?:S|Season[\s._-]*)0*(?P<season>\d{1,2})(?:/|$)", re.I),
+    re.compile(r"(?:^|/)第\s*(?P<season>\d{1,2})\s*季(?:/|$)"),
+)
+
+
+def _explicit_episode(value: str) -> tuple[int, int] | None:
+    for pattern in _SEASON_EPISODE_PATTERNS:
+        if match := pattern.search(value):
+            return int(match.group("season")), int(match.group("episode"))
+    season = 1
+    for pattern in _SEASON_PATH_PATTERNS:
+        if match := pattern.search(value):
+            season = int(match.group("season"))
+            break
+    for pattern in _EPISODE_ONLY_PATTERNS:
+        if match := pattern.search(value):
+            return season, int(match.group("episode"))
+    return None
+
+
+def _loose_episode(name: str) -> int | None:
+    """Read common 01.mp4 / 26_4K.mkv names without treating years as episodes."""
+    stem = PurePosixPath(name).stem
+    values = [int(value) for value in re.findall(r"(?:^|[\s._\-\[(])0*(\d{1,3})(?=$|[\s._\-\])])", stem)]
+    values = [value for value in values if 0 < value < 1000 and value not in {264, 265, 720}]
+    return values[-1] if values else None
+
+
+def episode_progress(files: list[ShareFile]) -> dict[str, Any]:
+    """Summarize progress from the real share file listing, never from PanSou text."""
+    videos = [
+        item for item in files
+        if not item.is_dir and PurePosixPath(item.name.lower()).suffix in _ALL_VIDEO_EXTENSIONS
+    ]
+    explicit = {
+        key for item in videos
+        if (key := _explicit_episode(item.path or item.name)) is not None
+    }
+    episodes = set(explicit)
+    # Numeric-only names are common in cloud shares. Require at least two distinct
+    # values before accepting this looser form, which avoids calling movie sequels
+    # such as “流浪地球2.mp4” episode 2.
+    loose_values = {value for item in videos if (value := _loose_episode(item.name)) is not None}
+    if len(loose_values) >= 2:
+        known_seasons = {season for season, _ in explicit}
+        default_season = next(iter(known_seasons)) if len(known_seasons) == 1 else 1
+        episodes.update((default_season, value) for value in loose_values)
+    latest_season = latest_episode = 0
+    if episodes:
+        latest_season, latest_episode = max(episodes)
+    if latest_episode:
+        label = (
+            f"实际更新至第{latest_season}季第{latest_episode}集"
+            if latest_season > 1
+            else f"实际更新至第{latest_episode}集"
+        )
+    elif videos:
+        label = f"实际读取到{len(videos)}个视频文件"
+    else:
+        label = "未读取到视频文件"
+    return {
+        "verified": True,
+        "video_file_count": len(videos),
+        "numbered_episode_count": len(episodes),
+        "latest_season": latest_season,
+        "latest_episode": latest_episode,
+        "label": label,
+    }
 
 
 def browser_support(name: str, mime_type: str = "") -> BrowserSupport:

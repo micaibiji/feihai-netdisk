@@ -69,6 +69,40 @@ def test_browser_support_is_conservative(name: str, playable: bool) -> None:
     assert browser_support(name).playable is playable
 
 
+def test_share_inspection_reports_actual_episode_progress_from_real_files() -> None:
+    inspection = ShareInspection(
+        "quark", "share", "剧集", "", [
+            ShareFile(id="1", name="S01E01.mp4", path="/剧集/S01E01.mp4"),
+            ShareFile(id="2", name="S01E02.1080p.mkv", path="/剧集/S01E02.1080p.mkv"),
+            ShareFile(id="3", name="S01E02.4K.mp4", path="/剧集/S01E02.4K.mp4"),
+            ShareFile(id="4", name="字幕.ass", path="/剧集/字幕.ass"),
+        ],
+    )
+    progress = inspection.public()["episode_progress"]
+    assert progress["verified"] is True
+    assert progress["video_file_count"] == 3
+    assert progress["numbered_episode_count"] == 2
+    assert progress["latest_episode"] == 2
+    assert progress["label"] == "实际更新至第2集"
+
+
+def test_share_inspection_accepts_numeric_episode_filenames_only_as_a_sequence() -> None:
+    series = ShareInspection(
+        "baidu", "share", "剧集", "", [
+            ShareFile(id="1", name="01.mp4"),
+            ShareFile(id="2", name="02_4K.mkv"),
+            ShareFile(id="3", name="03.mp4"),
+        ],
+    ).public()["episode_progress"]
+    movie = ShareInspection(
+        "baidu", "share", "电影", "", [ShareFile(id="1", name="流浪地球2.mp4")],
+    ).public()["episode_progress"]
+    assert series["latest_episode"] == 3
+    assert series["numbered_episode_count"] == 3
+    assert movie["latest_episode"] == 0
+    assert movie["label"] == "实际读取到1个视频文件"
+
+
 def test_115_hls_accepts_video_formats_that_browser_cannot_play_directly() -> None:
     support = pan115_playback_support("九门.S01E24.2160p.H.265.10-bit.DTS 5.1.mp4")
     assert support.playable is True
@@ -636,7 +670,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.32"
+    assert health["version"] == "1.0.33"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -942,6 +976,9 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "function requestTitle(resource)" in script
     assert "title:requestTitle(r)" in script
     assert "function apiErrorMessage(detail,status)" in script
+    assert "function actualProgressChip(r,inspection)" in script
+    assert "function refreshResourceCard(r)" in script
+    assert "实际更新至" not in script.split("function actualProgressChip", 1)[0]
     assert "z-index:2147483647" in Path("app/static/app.css").read_text(encoding="utf-8")
 
 
