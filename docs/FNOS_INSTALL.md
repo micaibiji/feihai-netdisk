@@ -4,7 +4,7 @@
 
 ## 推荐方式：应用中心安装 FPK
 
-1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载发布文件 `feihai-drive_1.0.25_all.fpk`。
+1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载发布文件 `feihai-drive_1.0.26_all.fpk`。
 2. 打开飞牛桌面的 **应用中心**。
 3. 点击 **本地安装**，选择下载好的 FPK。
 4. 安装设置已预填管理员账号 `admin`、密码 `admin`、PanSou 和检测站地址，确认无误后点击 **安装**。
@@ -60,7 +60,7 @@ flowchart LR
 ## 第二步：上传并解压
 
 1. 在 `feihai-drive` 目录中点击 **上传 → 上传文件**。
-2. 选择兼容发布包 `feihai-drive-v1.0.25.zip`。
+2. 选择兼容发布包 `feihai-drive-v1.0.26.zip`。
 3. 上传完成后，单击压缩包。
 4. 点击 **更多 → 解压**。
 5. 同名文件处理选择 **解压并覆盖**，然后点击 **确定**。
@@ -82,8 +82,8 @@ ADMIN_PASSWORD=请在这里填写你自己的强密码
 可直接填写你的服务地址：
 
 ```dotenv
-PANSOU_URL=http://192.168.100.213:8888
-CHECKER_URL=http://192.168.100.213:12110
+PANSOU_URL=http://host.docker.internal:8888
+CHECKER_URL=http://host.docker.internal:12110
 TEMP_RETENTION_HOURS=48
 ```
 
@@ -157,8 +157,8 @@ http://192.168.100.225:12366/
 
 进入 **设置**：
 
-1. **PanSou 地址**：填写你的 PanSou，如 `http://192.168.100.213:8888`。
-2. **网盘检测网站**：填写你的检测站，如 `http://192.168.100.213:12110`。
+1. **PanSou 地址**：如果和飞海网盘安装在同一台飞牛，保持预填的 `http://host.docker.internal:8888`；如果装在其他设备，填写那台设备的局域网地址。
+2. **网盘检测网站**：同一台飞牛保持预填的 `http://host.docker.internal:12110`；其他设备则填写对应的局域网地址。
 3. **TMDB API 密钥**：点击页面旁边的“获取与填写教程”申请并粘贴 Key。
 4. Telegram 为可选项；需要通知时再填写 Bot Token 和 Chat ID。
 5. 点击 **保存设置**。

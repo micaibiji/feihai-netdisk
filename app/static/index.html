@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.25">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.26">
 </head>
 <body>
   <header class="topbar">
@@ -114,7 +114,7 @@
     <section id="page-settings" class="page admin-page">
       <div class="page-head"><p class="eyebrow">只使用 12366 端口</p><h1>系统设置</h1><p>飞海网盘不会额外开放其他管理端口。</p></div>
       <form id="settingsForm" class="settings-grid">
-        <article class="settings-card"><div class="settings-title"><span>搜</span><div><h2>资源搜索与检测</h2><p>连接你自己部署的服务</p></div></div><label>PanSou 地址<input id="pansouUrl" placeholder="http://192.168.100.213:8888"></label><label>网盘检测网站<input id="checkerUrl" placeholder="http://192.168.100.213:12110"></label></article>
+        <article class="settings-card"><div class="settings-title"><span>搜</span><div><h2>资源搜索与检测</h2><p>连接你自己部署的服务</p></div></div><label>PanSou 地址<input id="pansouUrl" placeholder="http://host.docker.internal:8888"></label><label>网盘检测网站<input id="checkerUrl" placeholder="http://host.docker.internal:12110"></label></article>
         <article class="settings-card"><div class="settings-title"><span>影</span><div><h2>TMDB 影视数据</h2><p>海报、简介、排行与筛选</p></div></div><label>TMDB API 密钥 <a href="https://developer.themoviedb.org/docs/getting-started" target="_blank" rel="noreferrer">获取与填写教程 ↗</a><input id="tmdbKey" type="password" placeholder="已配置时留空不会覆盖"></label></article>
         <article class="settings-card"><div class="settings-title"><span>通</span><div><h2>Telegram 通知</h2><p id="telegramStatus">正在读取配置…</p></div></div><label>Bot Token<input id="telegramToken" type="password" placeholder="已配置时留空不会覆盖"></label><label>Chat ID<input id="telegramChatId" placeholder="例如 123456789"></label><button id="testTelegram" class="ghost full" type="button">发送测试通知</button></article>
         <article class="settings-card"><div class="settings-title"><span>安</span><div><h2>账号健康检查</h2><p>后台低频检查，异常时 Telegram 提醒一次</p></div></div><button id="checkAllAccounts" class="ghost full" type="button">立即检查全部网盘账号</button></article>
@@ -157,6 +157,6 @@
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js?v=1.0.25" defer></script>
+  <script src="/static/app.js?v=1.0.26" defer></script>
 </body>
 </html>

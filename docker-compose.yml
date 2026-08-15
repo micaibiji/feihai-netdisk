@@ -1,9 +1,11 @@
 services:
   feihai-drive:
     build: .
-    image: feihai-drive:1.0.25
+    image: feihai-drive:1.0.26
     container_name: feihai-drive
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "12366:12366"
     env_file:
