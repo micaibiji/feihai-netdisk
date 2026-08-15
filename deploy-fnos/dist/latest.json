@@ -1,0 +1,9 @@
+{
+  "app_id": "micaibiji-feihai-drive",
+  "appname": "feihai-drive",
+  "name": "飞海网盘",
+  "version": "1.0.25",
+  "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.25/feihai-drive_1.0.25_all.fpk",
+  "sha256": "7e9952f7823f89d94da3b3f5a592bb27b26a23675d89cf462f630ffb78e850e8",
+  "release_url": "https://github.com/micaibiji/feihai-netdisk/releases/tag/v1.0.25"
+}

@@ -4,7 +4,7 @@
 
 ## 推荐方式：应用中心安装 FPK
 
-1. 下载发布文件 `feihai-drive_1.0.25_all.fpk`。
+1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载发布文件 `feihai-drive_1.0.25_all.fpk`。
 2. 打开飞牛桌面的 **应用中心**。
 3. 点击 **本地安装**，选择下载好的 FPK。
 4. 安装设置已预填管理员账号 `admin`、密码 `admin`、PanSou 和检测站地址，确认无误后点击 **安装**。
@@ -205,6 +205,20 @@ TMDB 配置完成后，首页会自动出现：
 5. 提交保存任务，并在 **任务** 页查看进度。
 
 ## 更新方法
+
+### FPK 安装用户
+
+推荐在飞牛安装一次支持自定义 GitHub 软件源的 **FN软仓**，然后添加下面的软件源地址：
+
+```text
+https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main/micaibiji.json
+```
+
+以后发布新版时，在 FN软仓的飞海网盘卡片点击 **更新** 即可。更新过程由 fnOS 应用中心执行，应用数据目录会保留。当前版本也可以在 **应用中心 → 本地安装** 中选择更高版本 FPK 完成覆盖升级。
+
+飞海网盘不会为了自更新取得主机管理员权限，也不会因此占用额外端口。待应用通过飞牛官方审核并上架后，可直接从官方应用中心点击升级。
+
+### 旧版 Docker Compose 用户
 
 1. 在 Docker → Compose 中停止 `feihai-drive`。
 2. 保留 `.env` 和 `data`。

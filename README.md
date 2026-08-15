@@ -56,7 +56,7 @@ flowchart LR
 
 详细步骤见 [飞牛 fnOS 可视化安装教程](docs/FNOS_INSTALL.md)。
 
-1. 下载 `feihai-drive_1.0.25_all.fpk`。
+1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载 `feihai-drive_1.0.25_all.fpk`。
 2. 打开飞牛 **应用中心 → 本地安装**，选择 FPK 文件。
 3. 确认安装设置并完成安装。
 4. 从桌面打开“飞海网盘”，或访问 `http://飞牛IP:12366/`。
@@ -65,6 +65,18 @@ flowchart LR
 项目只映射 `12366`，不会额外占用 OpenList 或其他管理端口。
 
 开发者可运行 `python deploy-fnos/build_fpk.py` 重新生成 FPK。传统 Docker Compose 部署仍保留为兼容安装方式。
+
+## 在飞牛里点击升级
+
+仓库公开后，每个版本标签都会自动构建并发布 FPK、SHA256 校验文件和 `latest.json`。软件源文件固定为：
+
+```text
+https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main/micaibiji.json
+```
+
+在飞牛安装一次支持自定义 GitHub 软件源的 **FN软仓**，添加上面的地址；以后飞海网盘发布更高版本时，会直接出现 **更新** 按钮。安装和升级仍由 fnOS 应用中心完成，飞海网盘容器不会取得主机管理员权限，也不会增加新端口。
+
+如果以后通过飞牛官方审核并上架，升级按钮会直接出现在官方应用中心，无需再使用第三方软件源。
 
 ## 开发检查
 

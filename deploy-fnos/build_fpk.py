@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import struct
 import tarfile
+import tomllib
 import zlib
 from pathlib import Path
 
@@ -19,8 +21,12 @@ BUILD = DEPLOY / ".build"
 STAGE = BUILD / "feihai-drive"
 APP_STAGE = BUILD / "app"
 DIST = DEPLOY / "dist"
-VERSION = "1.0.25"
+PROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+VERSION = str(PROJECT["project"]["version"])
 OUTPUT = DIST / f"feihai-drive_{VERSION}_all.fpk"
+REPOSITORY = "https://github.com/micaibiji/feihai-netdisk"
+RAW_REPOSITORY = "https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main"
+DOWNLOAD_URL = f"{REPOSITORY}/releases/download/v{VERSION}/{OUTPUT.name}"
 
 
 def copy_tree(source: Path, target: Path) -> None:
@@ -130,6 +136,13 @@ def main() -> None:
     DIST.mkdir(parents=True, exist_ok=True)
     copy_tree(TEMPLATE, STAGE)
 
+    manifest_template = STAGE / "manifest"
+    manifest_text = manifest_template.read_text(encoding="utf-8")
+    if f"version={VERSION}" not in manifest_text:
+        raise RuntimeError(
+            "版本号不一致：请让 pyproject.toml 与 deploy-fnos/package/manifest 保持相同"
+        )
+
     docker_dir = STAGE / "app" / "docker"
     shutil.copy2(ROOT / "Dockerfile", docker_dir / "Dockerfile")
     shutil.copy2(ROOT / "requirements.txt", docker_dir / "requirements.txt")
@@ -159,10 +172,49 @@ def main() -> None:
         add_tree(archive, STAGE)
 
     validate()
+    sha256 = hashlib.sha256(OUTPUT.read_bytes()).hexdigest()
+    sha_file = OUTPUT.with_suffix(OUTPUT.suffix + ".sha256")
+    sha_file.write_text(f"{sha256}  {OUTPUT.name}\n", encoding="utf-8", newline="\n")
+
+    latest = {
+        "app_id": "micaibiji-feihai-drive",
+        "appname": "feihai-drive",
+        "name": "飞海网盘",
+        "version": VERSION,
+        "download_url": DOWNLOAD_URL,
+        "sha256": sha256,
+        "release_url": f"{REPOSITORY}/releases/tag/v{VERSION}",
+    }
+    (DIST / "latest.json").write_text(
+        json.dumps(latest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    source = [
+        {
+            "id": "micaibiji-feihai-drive",
+            "name": "飞海网盘",
+            "version": VERSION,
+            "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台",
+            "author": "飞海",
+            "tags": "影音娱乐,网盘工具",
+            "icon": f"{RAW_REPOSITORY}/deploy-fnos/icon.svg",
+            "download_url": DOWNLOAD_URL,
+            "screenshots": [],
+        }
+    ]
+    (ROOT / "micaibiji.json").write_text(
+        json.dumps(source, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
     size_mb = OUTPUT.stat().st_size / (1024 * 1024)
     print(f"已生成：{OUTPUT}")
     print(f"大小：{size_mb:.2f} MB")
     print(f"app.tgz MD5：{checksum}")
+    print(f"FPK SHA256：{sha256}")
 
 
 if __name__ == "__main__":
