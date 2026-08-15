@@ -1,7 +1,7 @@
 services:
   feihai-drive:
     build: .
-    image: feihai-drive:1.0.26
+    image: feihai-drive:1.0.27
     container_name: feihai-drive
     restart: unless-stopped
     extra_hosts:

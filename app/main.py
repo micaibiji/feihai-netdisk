@@ -41,7 +41,7 @@ from .models import (
 from .providers.auth import ProviderAuthError, poll_115_qr, start_115_qr
 from .providers.base import AuthenticationError, CapabilityError, CloudError, ShareFile, credential_payload
 from .providers.registry import ProviderRegistry
-from .providers.quark import QuarkAdapter
+from .providers.quark import QuarkAdapter, reset_quark_tv_device_limit
 from .providers.quark_tv import poll_quark_tv_qr, start_quark_tv_qr
 from .storage import Store, utc_now
 from .vault import CredentialVault
@@ -237,7 +237,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.26", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.27", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -253,7 +253,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.26",
+        "version": "1.0.27",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -1081,7 +1081,11 @@ async def quark_tv_qr_start(_: str = Depends(require_admin)) -> dict[str, Any]:
     if not vault.configured("provider_quark"):
         raise HTTPException(status_code=400, detail="请先保存夸克 Cookie，再绑定电视端播放授权")
     try:
-        public, secret_value = await start_quark_tv_qr()
+        current = credential_payload(vault.load("provider_quark"))
+        existing_device_id = str(current.get("tv_device_id") or "")
+        public, secret_value = await start_quark_tv_qr(existing_device_id)
+        if existing_device_id:
+            public["message"] = "请使用夸克手机 App 扫码并确认；系统正在续用本机原有电视设备，不会新增设备名额。"
     except (AuthenticationError, CloudError, httpx.HTTPError) as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
     session_id = uuid.uuid4().hex
@@ -1102,6 +1106,10 @@ async def quark_tv_qr_poll(session_id: str, _: str = Depends(require_admin)) -> 
             if "cookie" not in current:
                 current = {"cookie": current.get("credential", current_raw)}
             current.update(tokens)
+            reset_quark_tv_device_limit(
+                str(current.get("tv_refresh_token") or ""),
+                str(current.get("tv_device_id") or ""),
+            )
             credential = json.dumps(current, ensure_ascii=False)
             adapter = ProviderRegistry.create("quark", credential)
             account = await adapter.probe()

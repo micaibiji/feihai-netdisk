@@ -80,8 +80,11 @@ async def _request(
     return body
 
 
-async def start_quark_tv_qr() -> tuple[dict[str, str], dict[str, str]]:
-    device_id = hashlib.md5(uuid.uuid4().hex.encode()).hexdigest()
+async def start_quark_tv_qr(existing_device_id: str = "") -> tuple[dict[str, str], dict[str, str]]:
+    # A new device id creates another TV device at Quark.  Reusing the id
+    # already bound to this NAS lets a renewed QR authorization replace the
+    # credentials for the same device instead of consuming another slot.
+    device_id = existing_device_id.strip() or hashlib.md5(uuid.uuid4().hex.encode()).hexdigest()
     body = await _request(
         "GET",
         "/oauth/authorize",
