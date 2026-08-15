@@ -14,11 +14,12 @@ from app import integrations
 from app.integrations import tmdb_details
 from app.magnet import bdecode, magnet_info_hash, torrent_files
 from app.providers.baidu import BaiduAdapter
-from app.providers.base import BrowserSupport, CloudError, DirectLink, FolderEntry, ShareFile, browser_support
+from app.providers.base import AuthenticationError, BrowserSupport, CloudError, DirectLink, FolderEntry, ShareFile, browser_support
 from app.providers.mobile import MobileAdapter
 from app.providers.pan115 import Pan115Adapter
 from app.providers.auth import PAN115_QR_APP, PAN115_QR_TOKEN_URL, pan115_qr_image_url, pan115_qr_login_url
 from app.providers.quark import QuarkAdapter
+from app.providers.quark_tv import start_quark_tv_qr
 from app.providers.registry import ProviderRegistry
 from app.storage import Store
 from app.vault import CredentialVault
@@ -164,6 +165,50 @@ def test_quark_tv_authorization_uses_cloud_transcode(monkeypatch) -> None:
     assert direct.url == "https://transcode.example/1080p.mp4"
     assert direct.redirect is True
     assert direct.headers == {}
+
+
+def test_quark_tv_device_limit_falls_back_to_browser_cookie(monkeypatch) -> None:
+    adapter = QuarkAdapter(json.dumps({
+        "cookie": "__puus=secret; kps=token",
+        "tv_refresh_token": "refresh",
+        "tv_device_id": "device",
+    }))
+
+    tv_attempts = 0
+
+    async def rejected_tv_stream(*_args) -> str:
+        nonlocal tv_attempts
+        tv_attempts += 1
+        raise AuthenticationError("夸克电视端授权失败：设备数超限")
+
+    async def fake_request(_method, url, **_kwargs):
+        if url.endswith("/file/v2/play/project"):
+            raise CloudError("data invalid: [plf_invalid]")
+        return {"data": [{"download_url": "https://download.example/video.mp4"}]}
+
+    monkeypatch.setattr("app.providers.quark.quark_tv_stream_link", rejected_tv_stream)
+    monkeypatch.setattr(adapter, "request", fake_request)
+    direct = asyncio.run(adapter.direct_link(ShareFile(id="f1", name="video.mp4")))
+    assert direct.url == "https://download.example/video.mp4"
+    assert direct.headers["Cookie"] == "__puus=secret; kps=token"
+    assert direct.redirect is False
+    second = asyncio.run(adapter.direct_link(ShareFile(id="f2", name="second.mp4")))
+    assert second.url == "https://download.example/video.mp4"
+    assert tv_attempts == 1
+
+
+def test_quark_tv_qr_reuses_the_existing_nas_device(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_request(method, path, device_id, **_kwargs):
+        captured.update(method=method, path=path, device_id=device_id)
+        return {"qr_data": "image", "query_token": "query"}
+
+    monkeypatch.setattr("app.providers.quark_tv._request", fake_request)
+    public, secret = asyncio.run(start_quark_tv_qr("existing-device-id"))
+    assert public["qr_image_url"].endswith("image")
+    assert secret == {"device_id": "existing-device-id", "query_token": "query"}
+    assert captured["device_id"] == "existing-device-id"
 
 
 def test_mobile_token_parses_account() -> None:
@@ -446,7 +491,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.26"
+    assert health["version"] == "1.0.27"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401

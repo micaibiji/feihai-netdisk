@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import re
 import time
@@ -23,6 +24,17 @@ from .base import (
     join_path,
 )
 from .quark_tv import quark_tv_stream_link
+
+
+_TV_DEVICE_LIMITED: set[str] = set()
+
+
+def _tv_credential_key(refresh_token: str, device_id: str) -> str:
+    return hashlib.sha256(f"{device_id}\0{refresh_token}".encode()).hexdigest()
+
+
+def reset_quark_tv_device_limit(refresh_token: str, device_id: str) -> None:
+    _TV_DEVICE_LIMITED.discard(_tv_credential_key(refresh_token, device_id))
 
 
 class QuarkAdapter(CloudAdapter):
@@ -252,9 +264,23 @@ class QuarkAdapter(CloudAdapter):
         return result
 
     async def direct_link(self, file: ShareFile) -> DirectLink:
-        if self.tv_refresh_token and self.tv_device_id:
-            url = await quark_tv_stream_link(file.id, self.tv_refresh_token, self.tv_device_id)
-            return DirectLink(url, {}, "video/mp4", redirect=True)
+        tv_credential_key = _tv_credential_key(self.tv_refresh_token, self.tv_device_id)
+        if self.tv_refresh_token and self.tv_device_id and tv_credential_key not in _TV_DEVICE_LIMITED:
+            try:
+                url = await quark_tv_stream_link(file.id, self.tv_refresh_token, self.tv_device_id)
+                _TV_DEVICE_LIMITED.discard(tv_credential_key)
+                return DirectLink(url, {}, "video/mp4", redirect=True)
+            except (AuthenticationError, CloudError, httpx.HTTPError) as error:
+                # TV authorization is optional and Quark applies a separate
+                # device-count limit to it.  A stale/limited TV device must not
+                # disable a still-valid browser Cookie.  Continue with the web
+                # preview/download routes below instead.
+                message = str(error).lower()
+                if "设备数超限" in message or ("device" in message and "limit" in message):
+                    # Avoid sending every later playback through the already
+                    # rejected TV credential. A renewed QR token has a new hash
+                    # and is tried immediately without restarting the service.
+                    _TV_DEVICE_LIMITED.add(tv_credential_key)
         # Quark's original download link is frequently rate-limited for large
         # files.  Its web preview endpoint returns short-lived, browser-ready
         # transcoded URLs that can be redirected to directly and therefore do
