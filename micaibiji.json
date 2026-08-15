@@ -2,12 +2,12 @@
   {
     "id": "micaibiji-feihai-drive",
     "name": "飞海网盘",
-    "version": "1.0.27",
+    "version": "1.0.32",
     "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台",
     "author": "飞海",
     "tags": "影音娱乐,网盘工具",
     "icon": "https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main/deploy-fnos/icon.svg",
-    "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.27/feihai-drive_1.0.27_all.fpk",
+    "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.32/feihai-drive_1.0.32_all.fpk",
     "screenshots": []
   }
 ]

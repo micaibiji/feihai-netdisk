@@ -2,7 +2,7 @@
 
 飞海网盘是一套面向飞牛 fnOS 的私人网盘影视搜索、同盘保存与网页播放平台。它直接连接百度网盘、夸克网盘、115 网盘和中国移动云盘，不依赖 OpenList，也不读取飞牛的远程挂载目录。
 
-当前版本：`1.0.27`
+当前版本：`1.0.32`
 
 ## 核心能力
 
@@ -56,7 +56,7 @@ flowchart LR
 
 详细步骤见 [飞牛 fnOS 可视化安装教程](docs/FNOS_INSTALL.md)。
 
-1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载 `feihai-drive_1.0.27_all.fpk`。
+1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载 `feihai-drive_1.0.32_all.fpk`。
 2. 打开飞牛 **应用中心 → 本地安装**，选择 FPK 文件。
 3. 确认安装设置并完成安装。
 4. 从桌面打开“飞海网盘”，或访问 `http://飞牛IP:12366/`。

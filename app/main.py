@@ -237,7 +237,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.27", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.32", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -253,7 +253,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.27",
+        "version": "1.0.32",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -552,8 +552,6 @@ async def _prepare_cloud_temp(temp_id: str, payload: PreparePlayRequest, inspect
 @app.post("/api/play/prepare")
 async def prepare_play(payload: PreparePlayRequest, request: Request) -> dict[str, Any]:
     try:
-        if payload.provider.value == "115":
-            raise CapabilityError("115 已关闭在线播放，可复制分享链接或使用同盘保存")
         inspection = await _inspect(payload)
         candidates = [item for item in inspection.files if not item.is_dir and item.browser.playable]
         selected = next((item for item in candidates if item.id == payload.file_id), None) if payload.file_id else None
@@ -752,13 +750,20 @@ def _rewrite_hls_playlist(temp_id: str, text: str, base_url: str) -> str:
             return value
         return _hls_asset_url(temp_id, urljoin(base_url, value))
 
+    audio_lines = [line for line in text.splitlines() if line.startswith("#EXT-X-MEDIA:TYPE=AUDIO")]
+    has_stereo = any(re.search(r'NAME="(?:stereo|2\.0|双声道)"', line, re.I) for line in audio_lines)
     output: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line and not line.startswith("#"):
             output.append(localize(line))
             continue
-        output.append(re.sub(r'URI="([^"]+)"', lambda match: f'URI="{localize(match.group(1))}"', raw_line))
+        rewritten = re.sub(r'URI="([^"]+)"', lambda match: f'URI="{localize(match.group(1))}"', raw_line)
+        if has_stereo and rewritten.startswith("#EXT-X-MEDIA:TYPE=AUDIO"):
+            preferred = bool(re.search(r'NAME="(?:stereo|2\.0|双声道)"', rewritten, re.I))
+            rewritten = re.sub(r"DEFAULT=(?:YES|NO)", f"DEFAULT={'YES' if preferred else 'NO'}", rewritten)
+            rewritten = re.sub(r"AUTOSELECT=(?:YES|NO)", f"AUTOSELECT={'YES' if preferred else 'NO'}", rewritten)
+        output.append(rewritten)
     return "\n".join(output) + "\n"
 
 
@@ -810,13 +815,11 @@ async def _proxy_115_hls(temp_id: str, item: dict[str, Any], url: str, request: 
 
 @app.get("/api/hls/{temp_id}/master.m3u8")
 async def hls_master(temp_id: str, request: Request) -> Response:
-    raise HTTPException(status_code=410, detail="115 已关闭在线播放")
-    # 保留下面的旧临时记录兼容代码，当前不会进入。
     try:
         item = store.temp(temp_id)
         if item["provider"] != "115" or item["state"] != "ready":
             raise HTTPException(status_code=400, detail="这不是可用的115临时播放文件")
-        now = utc_now()
+        now = datetime.now(UTC)
         store.touch_temp(
             temp_id,
             now.isoformat(),
@@ -832,7 +835,6 @@ async def hls_master(temp_id: str, request: Request) -> Response:
 
 @app.get("/api/hls/{temp_id}/asset/{token}")
 async def hls_asset(temp_id: str, token: str, request: Request) -> Response:
-    raise HTTPException(status_code=410, detail="115 已关闭在线播放")
     try:
         item = store.temp(temp_id)
         if item["provider"] != "115" or item["state"] != "ready":

@@ -8,6 +8,7 @@ import httpx
 
 from .base import (
     AuthenticationError,
+    BrowserSupport,
     CloudAdapter,
     CloudError,
     DirectLink,
@@ -20,6 +21,19 @@ from .base import (
     extraction_code_from_url,
     join_path,
 )
+
+
+_HLS_VIDEO_EXTENSIONS = {
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ts", ".m2ts", ".flv", ".wmv",
+}
+
+
+def pan115_playback_support(name: str, mime_type: str = "") -> BrowserSupport:
+    """115 can serve its own browser-friendly HLS transcode for video files."""
+    suffix = "." + name.lower().rsplit(".", 1)[-1] if "." in name else ""
+    if suffix in _HLS_VIDEO_EXTENSIONS or mime_type.lower().startswith("video/"):
+        return BrowserSupport(True, "hls", "115 将使用网盘 HLS 转码线路播放")
+    return browser_support(name, mime_type)
 
 
 class Pan115Adapter(CloudAdapter):
@@ -164,7 +178,7 @@ class Pan115Adapter(CloudAdapter):
                     id=item_id, name=name, size=int(item.get("s") or item.get("size") or 0),
                     is_dir=is_dir, parent_id=parent_id, pick_code=str(item.get("pc") or ""),
                     mime_type=str(item.get("m") or ""), path=f"{prefix}/{name}".replace("//", "/"),
-                    browser=browser_support(name, str(item.get("m") or "")),
+                    browser=pan115_playback_support(name, str(item.get("m") or "")),
                 )
                 files.append(file)
                 if is_dir:
@@ -215,7 +229,7 @@ class Pan115Adapter(CloudAdapter):
             output.append(ShareFile(
                 id=self._id(item), name=name, size=int(item.get("s") or 0),
                 parent_id=target_id or self.root_id, pick_code=str(item.get("pc") or ""),
-                path=join_path(target_path, name), browser=browser_support(name),
+                path=join_path(target_path, name), browser=pan115_playback_support(name),
             ))
         return output
 

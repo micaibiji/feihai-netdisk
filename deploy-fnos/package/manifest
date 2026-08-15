@@ -1,5 +1,5 @@
 appname=feihai-drive
-version=1.0.27
+version=1.0.32
 display_name=飞海网盘
 desc=飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。
 source=thirdparty
@@ -14,5 +14,5 @@ service_port=12366
 checkport=true
 ctl_stop=true
 disable_authorization_path=true
-changelog=夸克电视端复用同一设备标识；设备数超限时自动切换 Cookie 播放，避免反复失败。
+changelog=百度分享支持递归读取多级目录；中国移动云盘支持分享解析、同盘保存与临时播放。
 checksum=

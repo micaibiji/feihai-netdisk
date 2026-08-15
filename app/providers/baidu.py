@@ -326,27 +326,77 @@ class BaiduAdapter(CloudAdapter):
         share_uk = str(meta.get("share_uk") or meta.get("uk") or "")
         if not share_id or not share_uk:
             raise CloudError("百度分享页缺少转存信息")
-        files = []
-        for item in items:
-            name = str(item.get("server_filename") or item.get("name") or "未命名")
-            is_dir = int(item.get("isdir") or 0) == 1
-            path = str(item.get("path") or f"/{name}")
-            files.append(ShareFile(
-                id=str(item.get("fs_id") or item.get("fsid") or ""), name=name,
-                size=int(item.get("size") or 0), is_dir=is_dir,
-                mime_type=str(item.get("mime_type") or ""), path=path,
-                browser=browser_support(name, str(item.get("mime_type") or "")),
-            ))
+        share_cookie = str(meta.get("_share_cookie") or self.cookie)
+        referer = str(meta.get("_referer") or share_url)
+        bdstoken = str(meta.get("bdstoken") or "")
+        files: list[ShareFile] = []
+
+        async def shared_directory(path: str) -> list[dict[str, Any]]:
+            output: list[dict[str, Any]] = []
+            for page in range(1, 101):
+                body = await self._json(
+                    "GET",
+                    "https://pan.baidu.com/share/list",
+                    params={
+                        "uk": share_uk,
+                        "shareid": share_id,
+                        "page": page,
+                        "num": 100,
+                        "dir": path,
+                        "order": "name",
+                        "desc": 0,
+                        "showempty": 0,
+                        "web": 1,
+                        "clienttype": 0,
+                        "bdstoken": bdstoken,
+                    },
+                    headers={"Cookie": share_cookie, "Referer": referer},
+                )
+                errno = int(body.get("errno") or 0)
+                if errno:
+                    message = body.get("errmsg") or body.get("show_msg") or errno
+                    raise CloudError(f"百度分享目录读取失败：{message}")
+                page_items = body.get("list") or []
+                if not isinstance(page_items, list):
+                    page_items = []
+                output.extend(page_items)
+                if len(page_items) < 100:
+                    break
+            return output
+
+        async def walk(children: list[dict[str, Any]], parent_id: str, depth: int) -> None:
+            if depth > 10 or len(files) >= 1000:
+                return
+            for item in children:
+                name = str(item.get("server_filename") or item.get("name") or "未命名")
+                is_dir = int(item.get("isdir") or 0) == 1
+                path = str(item.get("path") or f"/{name}")
+                file = ShareFile(
+                    id=str(item.get("fs_id") or item.get("fsid") or ""),
+                    name=name,
+                    size=int(item.get("size") or 0),
+                    is_dir=is_dir,
+                    parent_id=parent_id,
+                    mime_type=str(item.get("mime_type") or ""),
+                    path=path,
+                    browser=browser_support(name, str(item.get("mime_type") or "")),
+                )
+                files.append(file)
+                if is_dir and file.id and len(files) < 1000:
+                    await walk(await shared_directory(path), file.id, depth + 1)
+
+        await walk(items, "root", 0)
         if not files:
             raise CloudError("百度分享中没有可读取的文件")
+        title = next((item.name for item in files if item.parent_id == "root"), files[0].name)
         return ShareInspection(
-            self.name, share_id, files[0].name, code, files,
+            self.name, share_id, title, code, files,
             {
                 "share_uk": share_uk,
-                "bdstoken": str(meta.get("bdstoken") or ""),
+                "bdstoken": bdstoken,
                 "bdclnd": str(meta.get("_bdclnd") or ""),
-                "share_cookie": str(meta.get("_share_cookie") or ""),
-                "referer": str(meta.get("_referer") or share_url),
+                "share_cookie": share_cookie,
+                "referer": referer,
             },
         )
 

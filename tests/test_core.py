@@ -14,9 +14,18 @@ from app import integrations
 from app.integrations import tmdb_details
 from app.magnet import bdecode, magnet_info_hash, torrent_files
 from app.providers.baidu import BaiduAdapter
-from app.providers.base import AuthenticationError, BrowserSupport, CloudError, DirectLink, FolderEntry, ShareFile, browser_support
+from app.providers.base import (
+    AuthenticationError,
+    BrowserSupport,
+    CloudError,
+    DirectLink,
+    FolderEntry,
+    ShareFile,
+    ShareInspection,
+    browser_support,
+)
 from app.providers.mobile import MobileAdapter
-from app.providers.pan115 import Pan115Adapter
+from app.providers.pan115 import Pan115Adapter, pan115_playback_support
 from app.providers.auth import PAN115_QR_APP, PAN115_QR_TOKEN_URL, pan115_qr_image_url, pan115_qr_login_url
 from app.providers.quark import QuarkAdapter
 from app.providers.quark_tv import start_quark_tv_qr
@@ -58,6 +67,13 @@ def test_mobile_directory_detection_does_not_treat_file_type_one_as_folder() -> 
 )
 def test_browser_support_is_conservative(name: str, playable: bool) -> None:
     assert browser_support(name).playable is playable
+
+
+def test_115_hls_accepts_video_formats_that_browser_cannot_play_directly() -> None:
+    support = pan115_playback_support("九门.S01E24.2160p.H.265.10-bit.DTS 5.1.mp4")
+    assert support.playable is True
+    assert support.mode == "hls"
+    assert pan115_playback_support("字幕.ass").playable is False
 
 
 def test_share_url_parsers() -> None:
@@ -110,6 +126,50 @@ def test_baidu_merges_share_verification_cookie() -> None:
     assert "STOKEN=session" in cookie
     assert "BDCLND=new%2Bshare" in cookie
     assert "BDCLND=old" not in cookie
+
+
+def test_baidu_recursively_reads_shared_directories(monkeypatch) -> None:
+    adapter = BaiduAdapter(json.dumps({"cookie": "BDUSS=login; STOKEN=session"}))
+
+    async def fake_open_share(*_args):
+        return (
+            {
+                "shareid": "share-1",
+                "share_uk": "owner-1",
+                "bdstoken": "token",
+                "_share_cookie": "BDUSS=login; BDCLND=share",
+                "_referer": "https://pan.baidu.com/s/1demo",
+            },
+            [{"fs_id": 10, "server_filename": "剧集", "isdir": 1, "path": "/剧集"}],
+            "",
+        )
+
+    requested_paths: list[str] = []
+
+    async def fake_json(_method, _url, **kwargs):
+        path = kwargs["params"]["dir"]
+        requested_paths.append(path)
+        if path == "/剧集":
+            return {
+                "errno": 0,
+                "list": [{"fs_id": 11, "server_filename": "第一季", "isdir": 1, "path": "/剧集/第一季"}],
+            }
+        if path == "/剧集/第一季":
+            return {
+                "errno": 0,
+                "list": [{"fs_id": 12, "server_filename": "S01E01.mp4", "isdir": 0, "path": "/剧集/第一季/S01E01.mp4"}],
+            }
+        return {"errno": 0, "list": []}
+
+    monkeypatch.setattr(adapter, "_open_share", fake_open_share)
+    monkeypatch.setattr(adapter, "_json", fake_json)
+
+    inspection = asyncio.run(adapter.inspect_share("https://pan.baidu.com/s/1demo"))
+
+    assert requested_paths == ["/剧集", "/剧集/第一季"]
+    assert [item.name for item in inspection.files] == ["剧集", "第一季", "S01E01.mp4"]
+    assert inspection.files[-1].parent_id == "11"
+    assert inspection.files[-1].browser.playable is True
 
 
 def test_quark_direct_link_forwards_cookie_and_browser_context(monkeypatch) -> None:
@@ -234,6 +294,91 @@ def test_mobile_uses_current_mcloud_signature_header() -> None:
     assert len(signature) == 32
     assert signature == signature.upper()
     assert headers["Authorization"] == f"Basic {token}"
+
+
+@pytest.mark.parametrize(
+    "share_url",
+    [
+        "https://caiyun.139.com/m/i?2jGDtvGPRXt9m",
+        "https://yun.139.com/shareweb/#/w/i/2jGDtvGPRXt9m",
+        "https://yun.139.com/share/2jGDtvGPRXt9m",
+    ],
+)
+def test_mobile_share_url_parsing(share_url: str) -> None:
+    assert MobileAdapter.parse_share(share_url) == ("2jGDtvGPRXt9m", "")
+
+
+def test_mobile_share_payload_crypto_roundtrip() -> None:
+    payload = {"getOutLinkInfoReq": {"account": "13800138000", "linkID": "2jGDtvGPRXt9m"}}
+    encrypted = MobileAdapter._share_encrypt(payload)
+    assert MobileAdapter._share_decrypt(encrypted.encode()) == payload
+
+
+def test_mobile_recursively_reads_shared_directories(monkeypatch) -> None:
+    token = base64.b64encode(b"client:13800138000:secret").decode()
+    adapter = MobileAdapter(token)
+
+    async def fake_share_items(_link_id, _password, parent_id="root"):
+        if parent_id == "root":
+            return (
+                {"lkName": "测试剧集", "ownerAccount": "owner"},
+                [{"caID": "folder-1", "caName": "第一季", "path": "/第一季"}],
+                [],
+            )
+        return (
+            {},
+            [],
+            [{"coID": "file-1", "coName": "S01E01", "coSuffix": "mp4", "coPath": "/第一季/S01E01.mp4"}],
+        )
+
+    monkeypatch.setattr(adapter, "_share_items", fake_share_items)
+
+    inspection = asyncio.run(adapter.inspect_share("https://caiyun.139.com/m/i?2jGDtvGPRXt9m"))
+
+    assert inspection.title == "测试剧集"
+    assert [item.id for item in inspection.files] == ["folder-1", "file-1"]
+    assert inspection.files[1].token == "/第一季/S01E01.mp4"
+    assert inspection.files[1].browser.playable is True
+
+
+def test_mobile_same_cloud_save_uses_original_share_paths(monkeypatch) -> None:
+    token = base64.b64encode(b"client:13800138000:secret").decode()
+    adapter = MobileAdapter(token)
+    inspection = ShareInspection(
+        "china_mobile",
+        "2jGDtvGPRXt9m",
+        "测试剧集",
+        "",
+        [
+            ShareFile(
+                id="file-1",
+                name="S01E01.mp4",
+                parent_id="folder-1",
+                token="/第一季/S01E01.mp4",
+                path="/第一季/S01E01.mp4",
+                browser=browser_support("S01E01.mp4"),
+            )
+        ],
+        {"owner_account": "owner"},
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_share_post(endpoint, body):
+        captured.update(endpoint=endpoint, body=body)
+        return {"resultCode": "0", "data": {}}
+
+    async def fake_locate(*_args):
+        return [ShareFile(id="saved-1", name="S01E01.mp4")]
+
+    monkeypatch.setattr(adapter, "_share_post", fake_share_post)
+    monkeypatch.setattr(adapter, "locate_saved_files", fake_locate)
+
+    result = asyncio.run(adapter.save_share(inspection, "target", "/影视", ["file-1"], "skip"))
+
+    request = captured["body"]["createOuterLinkBatchOprTaskReq"]  # type: ignore[index]
+    assert request["taskInfo"]["contentInfoList"] == ["/第一季/S01E01.mp4"]
+    assert request["taskInfo"]["newCatalogID"] == "target"
+    assert result.saved_ids == ["saved-1"]
 
 
 def test_vault_encrypts_plaintext(tmp_path: Path) -> None:
@@ -491,7 +636,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.27"
+    assert health["version"] == "1.0.32"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -612,6 +757,84 @@ def test_cloud_transcode_redirect_omits_referer(web_client, monkeypatch) -> None
     assert response.headers["x-feihai-playback"] == "cloud-transcode"
 
 
+def test_115_hls_master_is_enabled(web_client, monkeypatch) -> None:
+    from starlette.responses import Response
+
+    client, main = web_client
+    now = datetime.now(UTC)
+    main.store.add_temp(
+        {
+            "id": "pan115-ready",
+            "provider": "115",
+            "title": "115测试视频",
+            "share_url": "https://115.com/s/example",
+            "cloud_file_id": "f115",
+            "cloud_parent_id": "root",
+            "file_name": "01.mp4",
+            "mime_type": "video/mp4",
+            "state": "ready",
+            "direct_hint": {"pick_code": "pick-code"},
+            "last_played_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=48)).isoformat(),
+            "created_at": now.isoformat(),
+        }
+    )
+
+    class HlsAdapter:
+        async def direct_link(self, _file):
+            return DirectLink(
+                "https://115.com/api/video/m3u8/pick-code.m3u8",
+                {"Cookie": "UID=test"},
+                "application/vnd.apple.mpegurl",
+            )
+
+    async def fake_proxy(temp_id, item, url, request):
+        assert temp_id == "pan115-ready"
+        assert item["provider"] == "115"
+        assert url.endswith("pick-code.m3u8")
+        return Response("#EXTM3U\n", media_type="application/vnd.apple.mpegurl")
+
+    monkeypatch.setattr(main, "_adapter", lambda _provider: HlsAdapter())
+    monkeypatch.setattr(main, "_proxy_115_hls", fake_proxy)
+    response = client.get("/api/hls/pan115-ready/master.m3u8")
+    assert response.status_code == 200
+    assert response.text == "#EXTM3U\n"
+
+
+def test_115_hls_master_prefers_stereo_audio() -> None:
+    import app.main as main
+
+    master = """#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="Audio-Group",NAME="5.1",DEFAULT=YES,AUTOSELECT=YES,URI="audio/0.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="Audio-Group",NAME="stereo",DEFAULT=NO,AUTOSELECT=NO,URI="audio/2.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x804,AUDIO="Audio-Group"
+video/1080p.m3u8
+"""
+    result = main._rewrite_hls_playlist("temp-115", master, "https://115.example/master.m3u8")
+    lines = result.splitlines()
+    surround = next(line for line in lines if 'NAME="5.1"' in line)
+    stereo = next(line for line in lines if 'NAME="stereo"' in line)
+    assert "DEFAULT=NO" in surround and "AUTOSELECT=NO" in surround
+    assert "DEFAULT=YES" in stereo and "AUTOSELECT=YES" in stereo
+    assert "/api/hls/temp-115/asset/" in result
+
+
+def test_hls_js_is_preferred_over_unreliable_native_hls() -> None:
+    script = Path("app/static/app.js").read_text(encoding="utf-8")
+    attach = script.split("async function attachPlaySource", 1)[1].split("async function selectEpisode", 1)[0]
+    assert attach.index("window.Hls&&Hls.isSupported()") < attach.index("video.canPlayType('application/vnd.apple.mpegurl')")
+    assert "startLevel:0" in attach
+    assert "AUDIO_TRACKS_UPDATED" in attach
+
+
+def test_hls_js_is_bundled_and_loaded_before_the_app() -> None:
+    page = Path("app/static/index.html").read_text(encoding="utf-8")
+    vendor = Path("app/static/vendor/hls.min.js")
+    assert vendor.stat().st_size > 500_000
+    assert "Hls" in vendor.read_text(encoding="utf-8")
+    assert page.index("/static/vendor/hls.min.js") < page.index("/static/app.js")
+
+
 def test_playback_reuse_happens_before_rate_limit() -> None:
     source = Path("app/main.py").read_text(encoding="utf-8")
     cloud_prepare = source.split('async def prepare_play', 1)[1].split('def _magnet_temp_item', 1)[0]
@@ -705,7 +928,8 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "保存原始分享的全部内容" in script
     assert "inspect-magnet" in script
     assert "/api/magnet/prepare" in script
-    assert "115 不提供网页播放" in script
+    assert "115 不提供网页播放" not in script
+    assert "r.provider!=='magnet'" in script
     assert "可播放；片名可能不一致，请自行确认" in script
     assert "可播放；集数形态可能不一致，请自行确认" in script
     assert "data-resource-view" in Path("app/static/index.html").read_text(encoding="utf-8")
@@ -715,6 +939,9 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "function showDialog(dialog)" in script
     assert "timeoutMs:38000" in script
     assert "data-retry-search" in script
+    assert "function requestTitle(resource)" in script
+    assert "title:requestTitle(r)" in script
+    assert "function apiErrorMessage(detail,status)" in script
     assert "z-index:2147483647" in Path("app/static/app.css").read_text(encoding="utf-8")
 
 

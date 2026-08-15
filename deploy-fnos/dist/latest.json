@@ -2,8 +2,8 @@
   "app_id": "micaibiji-feihai-drive",
   "appname": "feihai-drive",
   "name": "飞海网盘",
-  "version": "1.0.27",
-  "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.27/feihai-drive_1.0.27_all.fpk",
-  "sha256": "2587bda4edb1a82c9fb735258a8885310438969964b4737a61d54d51e1d0ffb2",
-  "release_url": "https://github.com/micaibiji/feihai-netdisk/releases/tag/v1.0.27"
+  "version": "1.0.32",
+  "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.32/feihai-drive_1.0.32_all.fpk",
+  "sha256": "584a7deb7b00eed840ff2f0e661b9953b44f1c356e8507a46978886d1daefd9e",
+  "release_url": "https://github.com/micaibiji/feihai-netdisk/releases/tag/v1.0.32"
 }

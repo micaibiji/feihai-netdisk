@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
+import os
 import random
 import re
 import string
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .base import (
     AuthenticationError,
@@ -24,6 +29,7 @@ from .base import (
     ShareInspection,
     browser_support,
     credential_payload,
+    extraction_code_from_url,
     join_path,
 )
 
@@ -42,6 +48,8 @@ class MobileAdapter(CloudAdapter):
     fallback_api = "https://personal-kd-njs.yun.139.com/hcy"
     route_api = "https://user-njs.yun.139.com/user/route/qryRoutePolicy"
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36"
+    share_api = "https://share-kd-njs.yun.139.com/yun-share"
+    share_key = b"PVGDwmcvfs1uV3d1"
 
     def __init__(self, credential: str):
         super().__init__(credential)
@@ -231,8 +239,212 @@ class MobileAdapter(CloudAdapter):
             raise CloudError("移动云盘已请求创建目录，但没有返回目录编号")
         return FolderEntry(folder_id, name, join_path(parent_path, name))
 
+    @staticmethod
+    def parse_share(share_url: str, extraction_code: str = "") -> tuple[str, str]:
+        parsed = urlparse(share_url)
+        query = parse_qs(parsed.query)
+        code = extraction_code_from_url(share_url, extraction_code)
+        link_id = str(
+            (query.get("linkID") or query.get("linkId") or query.get("id") or [""])[0]
+        ).strip()
+        if not link_id and parsed.query and "=" not in parsed.query:
+            link_id = parsed.query.split("&", 1)[0].strip()
+        if not link_id:
+            fragment = unquote(parsed.fragment or "")
+            match = re.search(r"/(?:m|w)/(?:i|s)/([A-Za-z0-9_-]+)", fragment, re.I)
+            if match:
+                link_id = match.group(1)
+        if not link_id:
+            match = re.search(
+                r"(?:yun|caiyun)\.139\.com/(?:share/|m/i\??|w/i/)([A-Za-z0-9_-]+)",
+                share_url,
+                re.I,
+            )
+            if match:
+                link_id = match.group(1)
+        link_id = link_id.split("#", 1)[0].split("?", 1)[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", link_id):
+            raise CloudError("移动云盘分享链接格式不正确")
+        return link_id, code
+
+    def _share_headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json;charset=UTF-8",
+            "X-Deviceinfo": "||9|12.27.0|firefox|140.0|||windows 10|1920X1080|zh-CN|||",
+            "hcy-cool-flag": "1",
+            "CMS-DEVICE": "default",
+            "x-m4c-caller": "PC",
+            "X-Yun-Api-Version": "v1",
+            "Origin": "https://yun.139.com",
+            "Referer": "https://yun.139.com/",
+        }
+        if self.token:
+            headers["Authorization"] = f"Basic {self.token}"
+        return headers
+
+    @classmethod
+    def _share_encrypt(cls, body: dict[str, Any]) -> str:
+        plaintext = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        iv = os.urandom(16)
+        padder = padding.PKCS7(128).padder()
+        padded = padder.update(plaintext) + padder.finalize()
+        encryptor = Cipher(algorithms.AES(cls.share_key), modes.CBC(iv)).encryptor()
+        encrypted = encryptor.update(padded) + encryptor.finalize()
+        return base64.b64encode(iv + encrypted).decode()
+
+    @classmethod
+    def _share_decrypt(cls, content: bytes) -> dict[str, Any]:
+        stripped = content.strip()
+        if stripped.startswith(b"{"):
+            value = json.loads(stripped)
+            return value if isinstance(value, dict) else {}
+        decoded = base64.b64decode(stripped)
+        if len(decoded) < 32:
+            raise CloudError("移动云盘分享接口返回了无法识别的数据")
+        decryptor = Cipher(algorithms.AES(cls.share_key), modes.CBC(decoded[:16])).decryptor()
+        padded = decryptor.update(decoded[16:]) + decryptor.finalize()
+        unpadder = padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded) + unpadder.finalize()
+        value = json.loads(plaintext)
+        return value if isinstance(value, dict) else {}
+
+    async def _share_post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.post(
+                f"{self.share_api}{path}",
+                content=self._share_encrypt(body).encode(),
+                headers=self._share_headers(),
+            )
+        response.raise_for_status()
+        try:
+            value = self._share_decrypt(response.content)
+        except (ValueError, TypeError) as error:
+            raise CloudError("移动云盘分享接口响应无法解析") from error
+        code = str(value.get("resultCode") or value.get("code") or value.get("status") or "0")
+        success = value.get("success")
+        if success is False or code not in {"", "0", "0000", "SUC0000", "200"}:
+            message = value.get("resultDesc") or value.get("message") or value.get("msg") or code
+            if code in {"401", "403", "9103", "A001"} or "登录" in str(message):
+                raise AuthenticationError(f"移动云盘授权已失效：{message}")
+            raise CloudError(f"移动云盘分享：{message}")
+        return value
+
+    @staticmethod
+    def _share_data(body: dict[str, Any]) -> dict[str, Any]:
+        value = body.get("data") or body.get("result") or body
+        return value if isinstance(value, dict) else {}
+
+    async def _share_items(
+        self, link_id: str, password: str, parent_id: str = "root"
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        body = await self._share_post(
+            "/richlifeApp/devapp/IOutLink/getOutLinkInfoV6",
+            {
+                "getOutLinkInfoReq": {
+                    "account": self.account,
+                    "linkID": link_id,
+                    "passwd": password,
+                    "pCaID": parent_id or "root",
+                }
+            },
+        )
+        data = self._share_data(body)
+        catalogs = data.get("caLst") or []
+        contents = data.get("coLst") or []
+        return data, catalogs if isinstance(catalogs, list) else [], contents if isinstance(contents, list) else []
+
     async def inspect_share(self, share_url: str, extraction_code: str = "") -> ShareInspection:
-        raise CapabilityError("移动云盘分享解析接口尚未通过当前账号实测；链接仍可复制")
+        link_id, password = self.parse_share(share_url, extraction_code)
+        files: list[ShareFile] = []
+        root_data: dict[str, Any] = {}
+
+        async def walk(parent_id: str, prefix: str, depth: int) -> None:
+            nonlocal root_data
+            if depth > 10 or len(files) >= 1000:
+                return
+            data, catalogs, contents = await self._share_items(link_id, password, parent_id)
+            if depth == 0:
+                root_data = data
+            for item in catalogs:
+                file_id = str(
+                    item.get("caID")
+                    or item.get("caId")
+                    or item.get("catalogID")
+                    or item.get("catalogId")
+                    or item.get("id")
+                    or ""
+                )
+                name = str(item.get("caName") or item.get("catalogName") or item.get("name") or "未命名")
+                display_path = join_path(prefix or "/", name)
+                source_path = str(
+                    item.get("path")
+                    or item.get("caPath")
+                    or item.get("catalogPath")
+                    or display_path
+                )
+                files.append(
+                    ShareFile(
+                        id=file_id,
+                        name=name,
+                        is_dir=True,
+                        parent_id=parent_id,
+                        token=source_path,
+                        path=display_path,
+                        browser=browser_support(name),
+                    )
+                )
+                if file_id:
+                    await walk(file_id, display_path, depth + 1)
+            for item in contents:
+                file_id = str(
+                    item.get("coID")
+                    or item.get("coId")
+                    or item.get("contentID")
+                    or item.get("contentId")
+                    or item.get("id")
+                    or ""
+                )
+                name = str(item.get("coName") or item.get("contentName") or item.get("name") or "未命名")
+                suffix = str(item.get("coSuffix") or item.get("suffix") or "").lstrip(".")
+                if suffix and not PurePosixPath(name).suffix:
+                    name = f"{name}.{suffix}"
+                mime_type = str(item.get("mimeType") or item.get("contentTypeName") or "")
+                display_path = join_path(prefix or "/", name)
+                source_path = str(
+                    item.get("path")
+                    or item.get("coPath")
+                    or item.get("contentPath")
+                    or display_path
+                )
+                files.append(
+                    ShareFile(
+                        id=file_id,
+                        name=name,
+                        size=int(item.get("coSize") or item.get("contentSize") or item.get("size") or 0),
+                        parent_id=parent_id,
+                        token=source_path,
+                        mime_type=mime_type,
+                        path=display_path,
+                        browser=browser_support(name, mime_type),
+                    )
+                )
+
+        await walk("root", "/", 0)
+        if not files:
+            raise CloudError("移动云盘分享中没有可读取的文件")
+        title = str(root_data.get("lkName") or root_data.get("linkName") or "").strip()
+        if not title:
+            title = next((item.name for item in files if item.parent_id == "root"), files[0].name)
+        return ShareInspection(
+            self.name,
+            link_id,
+            title,
+            password,
+            files,
+            {"owner_account": str(root_data.get("ownerAccount") or root_data.get("account") or "")},
+        )
 
     async def save_share(
         self,
@@ -242,7 +454,80 @@ class MobileAdapter(CloudAdapter):
         selected_file_ids: list[str],
         duplicate_policy: str,
     ) -> SaveResult:
-        raise CapabilityError("当前移动云盘账号未提供可靠的同盘分享转存接口")
+        selected_ids = set(selected_file_ids)
+        selected = [item for item in inspection.files if item.id in selected_ids]
+        if not selected:
+            selected = [item for item in inspection.files if item.parent_id == "root"]
+        if not selected:
+            raise CloudError("没有选择需要保存的移动云盘文件")
+        content_paths = [item.token or item.path or item.id for item in selected if not item.is_dir]
+        catalog_paths = [item.token or item.path or item.id for item in selected if item.is_dir]
+        folder_name = PurePosixPath(target_path or "/").name or "全部"
+        request_body = {
+            "createOuterLinkBatchOprTaskReq": {
+                "msisdn": self.account,
+                "ownerAccount": inspection.secret.get("owner_account", ""),
+                "taskType": 1,
+                "taskInfo": {
+                    "linkID": inspection.share_id,
+                    "contentInfoList": content_paths,
+                    "catalogInfoList": catalog_paths,
+                    "newCatalogID": target_id or self.root_id,
+                    "newCatalogName": folder_name,
+                    "needPassword": bool(inspection.extraction_code),
+                },
+                "linkID": inspection.share_id,
+                "needPassword": bool(inspection.extraction_code),
+            }
+        }
+        response: dict[str, Any] | None = None
+        last_error: Exception | None = None
+        for endpoint in (
+            "/richlifeApp/devapp/IBatchOprTask/createOuterLinkBatchOprTaskV2",
+            "/richlifeApp/devapp/IBatchOprTask/createOuterLinkBatchOprTask",
+        ):
+            try:
+                response = await self._share_post(endpoint, request_body)
+                break
+            except (CloudError, httpx.HTTPError) as error:
+                last_error = error
+        if response is None:
+            raise CloudError(f"移动云盘同盘保存失败：{last_error}")
+        data = self._share_data(response)
+        create_result = data.get("createBatchOprTaskRes") or data.get("createOuterLinkBatchOprTaskRes") or {}
+        task_id = str(
+            data.get("taskID")
+            or data.get("taskId")
+            or (create_result.get("taskID") if isinstance(create_result, dict) else "")
+            or (create_result.get("taskId") if isinstance(create_result, dict) else "")
+            or ""
+        )
+        if task_id:
+            for _ in range(10):
+                await asyncio.sleep(0.8)
+                try:
+                    task = await self._share_post(
+                        "/richlifeApp/devapp/IBatchOprTask/queryBatchOprTaskDetailV3",
+                        {"queryBatchOprTaskDetailReq": {"taskID": task_id, "msisdn": self.account}},
+                    )
+                except (CloudError, httpx.HTTPError):
+                    continue
+                task_data = self._share_data(task)
+                detail = task_data.get("queryBatchOprTaskDetailRes") or task_data
+                batch = detail.get("batchOprTask") if isinstance(detail, dict) else {}
+                status = str((batch or {}).get("taskStatus") or (batch or {}).get("status") or "")
+                if status.lower() in {"2", "success", "succeed", "finished", "failed"}:
+                    break
+        saved_files = await self.locate_saved_files(
+            target_id, target_path, [item.name for item in selected if not item.is_dir]
+        )
+        return SaveResult(
+            task_id,
+            [item.id for item in saved_files],
+            saved_files,
+            False,
+            f"已保存到 {target_path}",
+        )
 
     async def locate_saved_files(
         self, target_id: str, target_path: str, expected_names: list[str]
