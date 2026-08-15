@@ -2,7 +2,7 @@ services:
   feihai-drive:
     build:
       context: .
-    image: feihai-drive:1.0.24-fpk
+    image: feihai-drive:1.0.25-fpk
     container_name: feihai-drive-appcenter
     restart: unless-stopped
     ports:

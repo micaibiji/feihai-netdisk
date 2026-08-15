@@ -56,6 +56,10 @@ SESSION_COOKIE = "feihai_admin"
 # signed payload also expires, so a browser left open cannot stay privileged
 # forever.
 SESSION_SECONDS = 12 * 60 * 60
+# 本机服务通常会在数秒内响应。限制搜索链路的总等待，避免某个
+# 第三方接口异常时让页面一直停在“正在搜索”。
+PANSOU_SEARCH_TIMEOUT_SECONDS = 20.0
+LINK_CHECK_TIMEOUT_SECONDS = 12.0
 _qr_sessions: dict[str, dict[str, Any]] = {}
 _inspect_cache: dict[str, tuple[float, Any]] = {}
 _play_rate: dict[str, deque[float]] = defaultdict(deque)
@@ -215,7 +219,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.24", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.25", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -231,7 +235,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.24",
+        "version": "1.0.25",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -343,20 +347,36 @@ async def search_endpoint(
     integration = _integration_values()
     try:
         resources, media_result = await asyncio.gather(
-            search_pansou(integration["pansou_url"], q, integration["pansou_token"]),
+            asyncio.wait_for(
+                search_pansou(integration["pansou_url"], q, integration["pansou_token"]),
+                timeout=PANSOU_SEARCH_TIMEOUT_SECONDS,
+            ),
             search_tmdb(integration["tmdb_api_key"], q),
             return_exceptions=True,
         )
     except (ValueError, httpx.HTTPError) as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+    if isinstance(resources, TimeoutError):
+        raise HTTPException(status_code=504, detail="PanSou 搜索超时，请检查 PanSou 服务后重试")
     if isinstance(resources, Exception):
         raise HTTPException(status_code=502, detail=str(resources))
     media = [] if isinstance(media_result, Exception) else media_result
-    checked = await check_links(
-        integration["checker_url"],
-        [item["url"] for item in resources],
-        integration["checker_token"],
-    )
+    warning = ""
+    try:
+        checked = await asyncio.wait_for(
+            check_links(
+                integration["checker_url"],
+                [item["url"] for item in resources],
+                integration["checker_token"],
+            ),
+            timeout=LINK_CHECK_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        warning = "检测网站响应超时，未明确失效的资源已保留显示"
+        checked = {
+            item["url"]: {"state": "unverifiable", "reason": "检测网站响应超时，保留显示"}
+            for item in resources
+        }
     visible = []
     selected_media = next((value for value in media if value.get("id") == tmdb_id and (not media_type or value.get("media_type") == media_type)), None)
     selected_media = selected_media or (media[0] if media and tmdb_id is None else None)
@@ -374,6 +394,7 @@ async def search_endpoint(
     visible.sort(key=lambda value: (value.get("match_score", 0), value.get("validation_state") == "valid", value.get("episode", 0)), reverse=True)
     return {
         "query": q,
+        "warning": warning,
         "media": media,
         "selected_media": selected_media,
         "resources": visible,

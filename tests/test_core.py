@@ -445,7 +445,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.24"
+    assert health["version"] == "1.0.25"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -457,6 +457,53 @@ def test_public_health_and_admin_boundary(web_client) -> None:
     assert "max-age" not in response.headers["set-cookie"].lower()
     assert client.get("/api/admin/overview").status_code == 200
     assert client.post("/api/admin/integrations/telegram/test").status_code == 409
+
+
+def test_search_checker_timeout_keeps_unverified_resources(web_client, monkeypatch) -> None:
+    client, main = web_client
+
+    async def fake_search(*_args):
+        return [{
+            "provider": "quark", "provider_label": "夸克网盘", "title": "九门",
+            "url": "https://pan.quark.cn/s/example", "extraction_code": "", "source": "测试",
+            "fingerprint": "test-resource", "season": 0, "episode": 0, "quality": "1080P",
+            "recognized": True, "validation_state": "unverifiable", "validation_reason": "尚未检测",
+        }]
+
+    async def fake_tmdb(*_args):
+        return []
+
+    async def slow_checker(*_args):
+        await asyncio.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr(main, "search_pansou", fake_search)
+    monkeypatch.setattr(main, "search_tmdb", fake_tmdb)
+    monkeypatch.setattr(main, "check_links", slow_checker)
+    monkeypatch.setattr(main, "LINK_CHECK_TIMEOUT_SECONDS", 0.005)
+    response = client.get("/api/search", params={"q": "九门"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["warning"] == "检测网站响应超时，未明确失效的资源已保留显示"
+    assert body["resources"][0]["validation_state"] == "unverifiable"
+
+
+def test_search_pansou_timeout_returns_actionable_error(web_client, monkeypatch) -> None:
+    client, main = web_client
+
+    async def slow_search(*_args):
+        await asyncio.sleep(0.05)
+        return []
+
+    async def fake_tmdb(*_args):
+        return []
+
+    monkeypatch.setattr(main, "search_pansou", slow_search)
+    monkeypatch.setattr(main, "search_tmdb", fake_tmdb)
+    monkeypatch.setattr(main, "PANSOU_SEARCH_TIMEOUT_SECONDS", 0.005)
+    response = client.get("/api/search", params={"q": "九门"})
+    assert response.status_code == 504
+    assert response.json()["detail"] == "PanSou 搜索超时，请检查 PanSou 服务后重试"
 
 
 def test_index_disables_referer(web_client) -> None:
@@ -563,6 +610,7 @@ def test_static_page_has_guest_copy_and_no_public_directory(web_client) -> None:
     assert "OpenList" not in html
     assert 'id="episodeList"' in html
     assert 'id="copyDialog"' in html
+    assert 'id="toast" class="toast" popover="manual"' in html
 
 
 def test_compose_exposes_only_product_port() -> None:
@@ -596,6 +644,11 @@ def test_frontend_has_only_one_delegated_click_handler() -> None:
     assert "data-resource-view" in Path("app/static/index.html").read_text(encoding="utf-8")
     assert "localStorage.getItem('feihai-resource-view')" in script
     assert "resource-list-view" in Path("app/static/app.css").read_text(encoding="utf-8")
+    assert "showToastLayer(el)" in script
+    assert "function showDialog(dialog)" in script
+    assert "timeoutMs:38000" in script
+    assert "data-retry-search" in script
+    assert "z-index:2147483647" in Path("app/static/app.css").read_text(encoding="utf-8")
 
 
 def test_115_qr_login_uses_alipay_mini_device_type() -> None:

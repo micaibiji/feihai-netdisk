@@ -19,7 +19,7 @@ BUILD = DEPLOY / ".build"
 STAGE = BUILD / "feihai-drive"
 APP_STAGE = BUILD / "app"
 DIST = DEPLOY / "dist"
-VERSION = "1.0.24"
+VERSION = "1.0.25"
 OUTPUT = DIST / f"feihai-drive_{VERSION}_all.fpk"
 
 

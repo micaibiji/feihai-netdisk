@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="飞海网盘 - 面向网页播放的网盘影视搜索与同盘保存工具">
   <title>飞海网盘</title>
-  <link rel="stylesheet" href="/static/app.css?v=1.0.24">
+  <link rel="stylesheet" href="/static/app.css?v=1.0.25">
 </head>
 <body>
   <header class="topbar">
@@ -125,7 +125,7 @@
     </section>
   </main>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" popover="manual" role="status" aria-live="polite"></div>
 
   <dialog id="loginDialog" class="modal small-modal">
     <form id="loginForm" method="dialog"><button class="modal-close" value="cancel">×</button><p class="eyebrow">管理员验证</p><h2>进入后台管理</h2><p>访客无需登录即可搜索、复制链接和在线播放。</p><label>管理员账号<input id="loginUsername" autocomplete="username" value="admin"></label><label>验证密码<input id="loginPassword" type="password" autocomplete="current-password"></label><button id="loginSubmit" class="primary full" type="submit">验证并进入</button></form>
@@ -157,6 +157,6 @@
   </dialog>
 
   <dialog id="credentialDialog" class="modal credential-modal"><button class="modal-close" data-close>×</button><div id="credentialContent"></div></dialog>
-  <script src="/static/app.js?v=1.0.24" defer></script>
+  <script src="/static/app.js?v=1.0.25" defer></script>
 </body>
 </html>
