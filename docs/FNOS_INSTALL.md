@@ -4,7 +4,7 @@
 
 ## 推荐方式：应用中心安装 FPK
 
-1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载发布文件 `feihai-drive_1.0.27_all.fpk`。
+1. 从 [GitHub Releases](https://github.com/micaibiji/feihai-netdisk/releases/latest) 下载发布文件 `feihai-drive_1.0.33_all.fpk`。
 2. 打开飞牛桌面的 **应用中心**。
 3. 点击 **本地安装**，选择下载好的 FPK。
 4. 安装设置已预填管理员账号 `admin`、密码 `admin`、PanSou 和检测站地址，确认无误后点击 **安装**。

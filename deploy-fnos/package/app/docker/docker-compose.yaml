@@ -2,7 +2,7 @@ services:
   feihai-drive:
     build:
       context: .
-    image: feihai-drive:1.0.32-fpk
+    image: feihai-drive:1.0.33-fpk
     container_name: feihai-drive-appcenter
     restart: unless-stopped
     extra_hosts:
