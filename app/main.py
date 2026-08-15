@@ -215,7 +215,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.22", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.24", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -231,7 +231,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.22",
+        "version": "1.0.24",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,

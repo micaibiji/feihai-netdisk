@@ -1,0 +1,10 @@
+{
+  "docker-project": {
+    "projects": [
+      {
+        "name": "feihai-drive-appcenter",
+        "path": "docker"
+      }
+    ]
+  }
+}

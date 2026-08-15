@@ -1,0 +1,21 @@
+#!/bin/bash
+
+CONTAINER_NAME="feihai-drive-appcenter"
+
+case "$1" in
+  start|stop)
+    exit 0
+    ;;
+  status)
+    if docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}' 2>/dev/null | grep -qx true; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+      echo "不支持的操作：$1" > "$TRIM_TEMP_LOGFILE"
+    fi
+    exit 1
+    ;;
+esac

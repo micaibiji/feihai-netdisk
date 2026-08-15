@@ -1,0 +1,47 @@
+[
+  {
+    "stepTitle": "飞海网盘初始设置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "默认设置已经可以直接安装；这些内容安装后仍可在飞海网盘后台修改。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_admin_username",
+        "label": "管理员账号",
+        "initValue": "admin",
+        "rules": [{"required": true, "message": "请输入管理员账号"}]
+      },
+      {
+        "type": "password",
+        "field": "wizard_admin_password",
+        "label": "管理员密码",
+        "initValue": "admin",
+        "rules": [{"required": true, "message": "请输入管理员密码"}]
+      },
+      {
+        "type": "text",
+        "field": "wizard_pansou_url",
+        "label": "PanSou 地址",
+        "initValue": "http://192.168.100.213:8888"
+      },
+      {
+        "type": "text",
+        "field": "wizard_checker_url",
+        "label": "网盘检测站地址",
+        "initValue": "http://192.168.100.213:12110"
+      },
+      {
+        "type": "text",
+        "field": "wizard_retention_hours",
+        "label": "临时播放保留小时数",
+        "initValue": "48",
+        "rules": [
+          {"required": true, "message": "请输入保留时长"},
+          {"pattern": "^[0-9]+$", "message": "只能填写数字"}
+        ]
+      }
+    ]
+  }
+]
