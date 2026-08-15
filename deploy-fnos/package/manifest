@@ -1,5 +1,5 @@
 appname=feihai-drive
-version=1.0.25
+version=1.0.26
 display_name=飞海网盘
 desc=飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。
 source=thirdparty
@@ -14,5 +14,5 @@ service_port=12366
 checkport=true
 ctl_stop=true
 disable_authorization_path=true
-changelog=新增飞牛应用中心 FPK 一键安装、桌面入口、原生启停和可靠备份恢复。
+changelog=修复飞海网盘与 PanSou、检测站安装在同一台飞牛时搜索超时的问题。
 checksum=

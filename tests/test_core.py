@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app import integrations
 from app.integrations import tmdb_details
@@ -445,7 +446,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.25"
+    assert health["version"] == "1.0.26"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -457,6 +458,27 @@ def test_public_health_and_admin_boundary(web_client) -> None:
     assert "max-age" not in response.headers["set-cookie"].lower()
     assert client.get("/api/admin/overview").status_code == 200
     assert client.post("/api/admin/integrations/telegram/test").status_code == 409
+
+
+def test_same_nas_service_urls_use_container_host_gateway(web_client) -> None:
+    _, main = web_client
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/search",
+            "raw_path": b"/api/search",
+            "query_string": b"",
+            "headers": [(b"host", b"192.168.100.213:12366")],
+            "client": ("192.168.100.10", 50000),
+            "server": ("192.168.100.213", 12366),
+        }
+    )
+
+    assert main._container_service_url("http://192.168.100.213:8888", request) == "http://host.docker.internal:8888"
+    assert main._container_service_url("http://192.168.100.213:12110/api", request) == "http://host.docker.internal:12110/api"
+    assert main._container_service_url("http://192.168.100.225:8888", request) == "http://192.168.100.225:8888"
 
 
 def test_search_checker_timeout_keeps_unverified_resources(web_client, monkeypatch) -> None:

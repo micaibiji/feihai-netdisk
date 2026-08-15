@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
@@ -88,6 +88,24 @@ def _integration_values() -> dict[str, str]:
         "pansou_token": vault.load("pansou_token"),
         "checker_token": vault.load("checker_token"),
     }
+
+
+def _container_service_url(base_url: str, request: Request) -> str:
+    """Route services on the same NAS through Docker's host gateway."""
+    if not base_url:
+        return base_url
+    try:
+        parsed = urlsplit(base_url)
+        configured_host = (parsed.hostname or "").casefold()
+        request_host = (request.url.hostname or "").casefold()
+        if configured_host not in {request_host, "localhost", "127.0.0.1"}:
+            return base_url
+        netloc = "host.docker.internal"
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except ValueError:
+        return base_url
 
 
 def _session_token(username: str) -> str:
@@ -219,7 +237,7 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(cleanup, monitor, *background_tasks, return_exceptions=True)
 
 
-app = FastAPI(title=settings.app_name, version="1.0.25", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.26", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -235,7 +253,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "name": settings.app_name,
-        "version": "1.0.25",
+        "version": "1.0.26",
         "port_policy": "single-port",
         "temp_retention_hours": settings.temp_retention_hours,
         "magnet_playback": True,
@@ -340,15 +358,18 @@ def _resource_match(item: dict[str, Any], media: dict[str, Any] | None, query: s
 
 @app.get("/api/search")
 async def search_endpoint(
+    request: Request,
     q: str = Query(min_length=1, max_length=200),
     tmdb_id: int | None = Query(None, ge=1),
     media_type: str = Query("", pattern=r"^(|movie|tv)$"),
 ) -> dict[str, Any]:
     integration = _integration_values()
+    pansou_url = _container_service_url(integration["pansou_url"], request)
+    checker_url = _container_service_url(integration["checker_url"], request)
     try:
         resources, media_result = await asyncio.gather(
             asyncio.wait_for(
-                search_pansou(integration["pansou_url"], q, integration["pansou_token"]),
+                search_pansou(pansou_url, q, integration["pansou_token"]),
                 timeout=PANSOU_SEARCH_TIMEOUT_SECONDS,
             ),
             search_tmdb(integration["tmdb_api_key"], q),
@@ -365,7 +386,7 @@ async def search_endpoint(
     try:
         checked = await asyncio.wait_for(
             check_links(
-                integration["checker_url"],
+                checker_url,
                 [item["url"] for item in resources],
                 integration["checker_token"],
             ),

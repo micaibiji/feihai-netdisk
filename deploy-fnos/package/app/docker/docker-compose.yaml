@@ -2,9 +2,11 @@ services:
   feihai-drive:
     build:
       context: .
-    image: feihai-drive:1.0.25-fpk
+    image: feihai-drive:1.0.26-fpk
     container_name: feihai-drive-appcenter
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${TRIM_SERVICE_PORT}:12366"
     environment:
@@ -13,8 +15,8 @@ services:
       ADMIN_USERNAME: "${wizard_admin_username:-admin}"
       ADMIN_PASSWORD: "${wizard_admin_password:-admin}"
       DATA_DIR: /app/data
-      PANSOU_URL: "${wizard_pansou_url:-http://192.168.100.213:8888}"
-      CHECKER_URL: "${wizard_checker_url:-http://192.168.100.213:12110}"
+      PANSOU_URL: "${wizard_pansou_url:-http://host.docker.internal:8888}"
+      CHECKER_URL: "${wizard_checker_url:-http://host.docker.internal:12110}"
       TEMP_RETENTION_HOURS: "${wizard_retention_hours:-48}"
       TEMP_FOLDER_NAME: 影视临时播放
       CLEANUP_INTERVAL_SECONDS: "600"

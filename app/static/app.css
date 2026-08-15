@@ -157,7 +157,7 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .main-nav button{font-size:12px}.hero{padding:26px 18px}.hero h1{font-size:31px}
 }
 
-/* 1.0.25：顶层弹窗通知与搜索超时收尾。 */
+/* 1.0.26：同机服务访问修复与顶层弹窗通知收尾。 */
 .modal{z-index:1000}
 .toast{inset:24px auto auto 50%;bottom:auto;width:max-content;max-width:min(680px,calc(100vw - 32px));margin:0;border:1px solid rgba(255,255,255,.18);transform:translate(-50%,-18px);padding:14px 20px;box-shadow:0 16px 55px rgba(0,0,0,.38);z-index:2147483647;text-align:center;line-height:1.55}
 .toast.show,.toast:popover-open.show{opacity:1;transform:translate(-50%,0)}

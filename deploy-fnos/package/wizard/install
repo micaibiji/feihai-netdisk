@@ -24,13 +24,13 @@
         "type": "text",
         "field": "wizard_pansou_url",
         "label": "PanSou 地址",
-        "initValue": "http://192.168.100.213:8888"
+        "initValue": "http://host.docker.internal:8888"
       },
       {
         "type": "text",
         "field": "wizard_checker_url",
         "label": "网盘检测站地址",
-        "initValue": "http://192.168.100.213:12110"
+        "initValue": "http://host.docker.internal:12110"
       },
       {
         "type": "text",
