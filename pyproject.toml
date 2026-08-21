@@ -1,6 +1,6 @@
 [project]
 name = "feihai-drive"
-version = "1.0.33"
+version = "1.0.34"
 description = "飞海网盘：网页播放优先的网盘影视搜索与同盘保存工具"
 requires-python = ">=3.12"
 

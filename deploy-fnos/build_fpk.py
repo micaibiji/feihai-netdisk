@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 import shutil
@@ -11,7 +12,9 @@ import struct
 import tarfile
 import tomllib
 import zlib
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,9 +106,37 @@ def normalize_permissions(base: Path) -> None:
             path.chmod(0o644)
 
 
+def normalize_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Remove host-specific metadata so local and CI packages have one checksum."""
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    info.mtime = 0
+    info.pax_headers = {}
+    if info.isdir():
+        info.mode = 0o755
+    elif info.isfile():
+        info.mode = 0o755 if "cmd" in Path(info.name).parts else 0o644
+    return info
+
+
+@contextmanager
+def reproducible_tar_gz(path: Path) -> Iterator[tarfile.TarFile]:
+    with path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                yield archive
+
+
 def add_tree(archive: tarfile.TarFile, base: Path) -> None:
     for path in sorted(base.rglob("*"), key=lambda item: item.as_posix()):
-        archive.add(path, arcname=path.relative_to(base).as_posix(), recursive=False)
+        archive.add(
+            path,
+            arcname=path.relative_to(base).as_posix(),
+            recursive=False,
+            filter=normalize_tar_info,
+        )
 
 
 def validate() -> None:
@@ -157,7 +188,7 @@ def main() -> None:
     shutil.move(str(STAGE / "app"), str(APP_STAGE / "app"))
     normalize_permissions(APP_STAGE / "app")
     app_tgz = STAGE / "app.tgz"
-    with tarfile.open(app_tgz, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    with reproducible_tar_gz(app_tgz) as archive:
         add_tree(archive, APP_STAGE / "app")
 
     checksum = hashlib.md5(app_tgz.read_bytes()).hexdigest()
@@ -168,7 +199,7 @@ def main() -> None:
     normalize_permissions(STAGE)
     if OUTPUT.exists():
         OUTPUT.unlink()
-    with tarfile.open(OUTPUT, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    with reproducible_tar_gz(OUTPUT) as archive:
         add_tree(archive, STAGE)
 
     validate()

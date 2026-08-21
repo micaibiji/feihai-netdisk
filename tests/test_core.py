@@ -670,7 +670,7 @@ def web_client(tmp_path: Path, monkeypatch):
 def test_public_health_and_admin_boundary(web_client) -> None:
     client, main = web_client
     health = client.get("/api/health").json()
-    assert health["version"] == "1.0.33"
+    assert health["version"] == "1.0.34"
     assert health["port_policy"] == "single-port"
     assert health["magnet_playback"] is True
     assert client.get("/api/admin/overview").status_code == 401
@@ -950,7 +950,8 @@ def test_compose_exposes_only_product_port() -> None:
 def test_frontend_has_only_one_delegated_click_handler() -> None:
     script = Path("app/static/app.js").read_text(encoding="utf-8")
     assert script.count("document.addEventListener('click'") == 1
-    assert 'data-intro-search="${esc(media.title||item.title)}"' in script
+    assert 'data-intro-search="${esc(title)}"' in script
+    assert "function cleanDisplayTitle" in script
     assert "document.execCommand('copy')" in script
     assert script.index("navigator.clipboard?.writeText") < script.index("legacyCopyText(value);return false")
     assert "data-job-retry" in script

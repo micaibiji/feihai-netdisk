@@ -173,3 +173,27 @@ main{min-height:calc(100vh - 82px)}.page{display:none;max-width:1540px;margin:0 
   .media-match{grid-template-columns:74px minmax(0,1fr)}.media-match p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.select-media{width:100%}
   .player-progress{grid-template-columns:1fr}.player-task-actions{display:grid;grid-template-columns:1fr}.backup-actions{display:grid}
 }
+
+/* 1.0.34：精简搜索候选、提高手机可读性，并为危险操作提供清晰确认。 */
+.media-matches{display:block}
+.media-primary{display:grid;grid-template-columns:minmax(320px,720px)}
+.media-alternatives{margin-top:12px;border:1px solid var(--line);border-radius:13px;background:#fff;padding:0 13px}
+.media-alternatives summary{cursor:pointer;padding:13px 2px;color:var(--green-dark);font-weight:800}
+.media-matches-more{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:0 0 13px}
+.resource-load-more{grid-column:1/-1;min-height:46px;border:1px solid #bfe3d1;border-radius:12px;background:#f1fbf6;color:var(--green-dark);font-size:14px;font-weight:800}
+.resource-grid .resource-actions button{min-height:42px;font-size:14px}
+.resource-grid .chip,.resource-grid .inspect-state{font-size:12px}
+.version-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:13px 0;margin:8px 0 14px}.version-row strong{color:var(--green-dark);font-size:18px}.update-link{display:block;text-align:center;text-decoration:none}
+.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:20px}.confirm-actions button{min-height:44px;border-radius:10px;font-weight:800}.danger{border:0;background:#c93d36;color:#fff}.danger:hover{background:#ae302a}
+
+@media(max-width:1200px){.media-matches-more{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){
+  .main-nav{grid-template-columns:repeat(auto-fit,minmax(52px,1fr));gap:3px}.main-nav button{min-height:46px;padding:8px 2px;font-size:13px}.page{padding-bottom:82px}
+  .media-primary{grid-template-columns:1fr}.media-alternatives{margin-top:9px}.media-alternatives summary{min-height:46px;display:flex;align-items:center}.media-matches-more{grid-template-columns:1fr;gap:9px}
+  .resource-filters button{min-height:44px;font-size:14px}.resource-view-toggle button{min-height:42px;font-size:13px}
+  .resource-grid .resource-card h3{height:44px;font-size:15px;line-height:1.45}.resource-grid .chip,.resource-grid .inspect-state{font-size:12px}.resource-grid .resource-actions button{min-height:44px;font-size:14px}
+  .resource-list-view .resource-card h3{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;max-height:87px;font-size:16px}
+  .poster-card p,.filter-row label,.filter-row select{font-size:13px}.filter-row select{min-height:42px}
+  .quick-filter-row button,.pager button,.select-media{min-height:42px;font-size:14px}
+  .breadcrumbs button{min-height:42px}.directory-item{min-height:44px}.confirm-actions{grid-template-columns:1fr}
+}
