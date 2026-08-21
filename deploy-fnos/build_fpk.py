@@ -30,6 +30,12 @@ OUTPUT = DIST / f"feihai-drive_{VERSION}_all.fpk"
 REPOSITORY = "https://github.com/micaibiji/feihai-netdisk"
 RAW_REPOSITORY = "https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main"
 DOWNLOAD_URL = f"{REPOSITORY}/releases/download/v{VERSION}/{OUTPUT.name}"
+TEXT_SUFFIXES = {
+    ".css", ".html", ".js", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"
+}
+TEXT_FILENAMES = {
+    "Dockerfile", "config", "install", "main", "manifest", "privilege", "resource", "uninstall", "upgrade"
+}
 
 
 def copy_tree(source: Path, target: Path) -> None:
@@ -94,6 +100,21 @@ def write_png(path: Path, size: int) -> None:
     raw += chunk(b"IEND", b"")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
+
+
+def normalize_text_files(base: Path) -> None:
+    """Keep packaged text files byte-identical on Windows and Linux checkouts."""
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix and path.suffix.lower() not in TEXT_SUFFIXES and path.name not in TEXT_FILENAMES:
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw:
+            continue
+        normalized = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if normalized != raw:
+            path.write_bytes(normalized)
 
 
 def normalize_permissions(base: Path) -> None:
@@ -183,6 +204,7 @@ def main() -> None:
         write_png(STAGE / "app" / "ui" / "images" / f"icon_{size}.png", size)
     write_png(STAGE / "ICON.PNG", 64)
     write_png(STAGE / "ICON_256.PNG", 256)
+    normalize_text_files(STAGE)
 
     APP_STAGE.mkdir(parents=True)
     shutil.move(str(STAGE / "app"), str(APP_STAGE / "app"))
