@@ -244,6 +244,7 @@ def main() -> None:
         newline="\n",
     )
 
+    size_mb = OUTPUT.stat().st_size / (1024 * 1024)
     source = [
         {
             "id": "micaibiji-feihai-drive",
@@ -263,7 +264,28 @@ def main() -> None:
         newline="\n",
     )
 
-    size_mb = OUTPUT.stat().st_size / (1024 * 1024)
+    fnpack = {
+        "feihai-drive": {
+            "display_name": "飞海网盘",
+            "platform": "all",
+            "labels": "影视,网盘,工具",
+            "version": VERSION,
+            "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。",
+            "size": f"{size_mb:.2f}",
+            "changelog": "请查看 GitHub Releases 获取本版本更新说明。",
+            "author": "飞海",
+            "author_url": REPOSITORY,
+            "bug_report_url": f"{REPOSITORY}/issues",
+            "install_type": "存储空间",
+            "download_url": DOWNLOAD_URL,
+        }
+    }
+    (ROOT / "fnpack.json").write_text(
+        json.dumps(fnpack, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
     print(f"已生成：{OUTPUT}")
     print(f"大小：{size_mb:.2f} MB")
     print(f"app.tgz MD5：{checksum}")

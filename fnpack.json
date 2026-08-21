@@ -1,0 +1,16 @@
+{
+  "feihai-drive": {
+    "display_name": "飞海网盘",
+    "platform": "all",
+    "labels": "影视,网盘,工具",
+    "version": "1.0.34",
+    "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。",
+    "size": "0.27",
+    "changelog": "请查看 GitHub Releases 获取本版本更新说明。",
+    "author": "飞海",
+    "author_url": "https://github.com/micaibiji/feihai-netdisk",
+    "bug_report_url": "https://github.com/micaibiji/feihai-netdisk/issues",
+    "install_type": "存储空间",
+    "download_url": "https://github.com/micaibiji/feihai-netdisk/releases/download/v1.0.34/feihai-drive_1.0.34_all.fpk"
+  }
+}

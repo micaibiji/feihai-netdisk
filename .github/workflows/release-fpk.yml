@@ -43,7 +43,7 @@ jobs:
         run: python deploy-fnos/build_fpk.py
 
       - name: 确认软件源版本已经提交
-        run: git diff --exit-code -- micaibiji.json
+        run: git diff --exit-code -- micaibiji.json fnpack.json
 
       - name: 发布 GitHub Release
         env:

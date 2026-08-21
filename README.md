@@ -68,13 +68,21 @@ flowchart LR
 
 ## 在飞牛里点击升级
 
-仓库公开后，每个版本标签都会自动构建并发布 FPK、SHA256 校验文件和 `latest.json`。软件源文件固定为：
+仓库公开后，每个版本标签都会自动构建并发布 FPK、SHA256 校验文件和 `latest.json`。
+
+已经安装 **FnDepot** 的用户，在 FnDepot 的“设置 → 添加源”中填写：
+
+```text
+https://github.com/micaibiji/feihai-netdisk
+```
+
+使用 **FN软仓** 的用户，添加下面的软件源地址：
 
 ```text
 https://raw.githubusercontent.com/micaibiji/feihai-netdisk/main/micaibiji.json
 ```
 
-在飞牛安装一次支持自定义 GitHub 软件源的 **FN软仓**，添加上面的地址；以后飞海网盘发布更高版本时，会直接出现 **更新** 按钮。安装和升级仍由 fnOS 应用中心完成，飞海网盘容器不会取得主机管理员权限，也不会增加新端口。
+以后飞海网盘发布更高版本时，FnDepot 或 FN软仓会直接出现 **更新** 按钮。安装和升级仍由 fnOS 应用中心完成，飞海网盘容器不会取得主机管理员权限，也不会增加新端口。
 
 如果以后通过飞牛官方审核并上架，升级按钮会直接出现在官方应用中心，无需再使用第三方软件源。
 
