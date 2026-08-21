@@ -265,20 +265,37 @@ def main() -> None:
     )
 
     fnpack = {
-        "feihai-drive": {
-            "display_name": "飞海网盘",
-            "platform": "all",
-            "labels": "影视,网盘,工具",
-            "version": VERSION,
-            "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。",
-            "size": f"{size_mb:.2f}",
-            "changelog": "请查看 GitHub Releases 获取本版本更新说明。",
+        "schema_version": "2.0",
+        "source_info": {
+            "name": "飞海网盘应用源",
             "author": "飞海",
-            "author_url": REPOSITORY,
-            "bug_report_url": f"{REPOSITORY}/issues",
-            "install_type": "存储空间",
-            "download_url": DOWNLOAD_URL,
-        }
+            "homepage": REPOSITORY,
+        },
+        "apps": {
+            "feihai-drive": {
+                "display_name": "飞海网盘",
+                "desc": "飞牛 fnOS 私人网盘影视搜索、同盘保存与网页播放平台。",
+                "platform": ["all"],
+                "categories": ["影音娱乐"],
+                "icon_url": f"{RAW_REPOSITORY}/deploy-fnos/icon.svg",
+                "run_as": "package",
+                "install_type": "",
+                "is_docker": True,
+                "service_port": "12366",
+                "releases": {
+                    VERSION: {
+                        "changelog": "请查看 GitHub Releases 获取本版本更新说明。",
+                        "packages": {
+                            "all": {
+                                "download_url": DOWNLOAD_URL,
+                                "sha256": sha256,
+                                "size": OUTPUT.stat().st_size,
+                            }
+                        },
+                    }
+                },
+            }
+        },
     }
     (ROOT / "fnpack.json").write_text(
         json.dumps(fnpack, ensure_ascii=False, indent=2) + "\n",
